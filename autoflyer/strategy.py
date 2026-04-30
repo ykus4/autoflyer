@@ -72,7 +72,9 @@ VARIANTS: list[Variant] = [
     Variant("MA200_GARCH20", use_ma200_filter=True, garch_target_vol=0.20),
     Variant("MA200_GARCH30", use_ma200_filter=True, garch_target_vol=0.30),
     # グリッドサーチ最優秀（8年・Calmar 1.20）: 推奨本番設定
-    Variant("MA200_STOP1.5ATR_GARCH40", use_ma200_filter=True, atr_stop_mult=1.5, garch_target_vol=0.40),
+    Variant(
+        "MA200_STOP1.5ATR_GARCH40", use_ma200_filter=True, atr_stop_mult=1.5, garch_target_vol=0.40
+    ),
     # 広いストップ（1D 向け）
     Variant("STOP_4ATR", atr_stop_mult=4.0),
     Variant("STOP_5ATR", atr_stop_mult=5.0),

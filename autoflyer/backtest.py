@@ -370,6 +370,7 @@ def _garch_fraction(
     if v.garch_target_vol <= 0:
         return 1.0
     from .garch_sizing import garch_position_fraction
+
     key = (len(close), v.garch_target_vol)
     if key not in cache:
         cache[key] = garch_position_fraction(close, target_vol=v.garch_target_vol)

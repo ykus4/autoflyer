@@ -2,39 +2,32 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["main"]
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run ruff check autoflyer/ tests/
+      - run: uv run ruff format --check autoflyer/ tests/
+
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.10", "3.12"]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-
-      - name: Install dependencies
-        run: uv sync --all-extras
-
-      - name: Lint (ruff)
-        run: uv run ruff check autoflyer/ tests/
-
-      - name: Format check (ruff)
-        run: uv run ruff format --check autoflyer/ tests/
-
-      - name: Test (pytest)
-        run: uv run pytest tests/ -q --tb=short
-
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run pytest tests/ -q --tb=short
       - name: Import smoke test
         run: |
           uv run python -c "from autoflyer.dashboard import app; print('dashboard ok')"

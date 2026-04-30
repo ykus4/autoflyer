@@ -1,0 +1,57 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "false"
+    volumes:
+      - ./data:/app/data
+      - ./state.json:/app/state.json
+      - ./logs:/app/logs
+    command:
+      - bot
+      - --timeframe
+      - "1D"
+      - --variant
+      - MA200_STOP1.5ATR_GARCH40
+      - --log-file
+      - /app/logs/bot.log
+      - --max-dd-pct
+      - "30"
+      - --live
+
+  updater:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    # 毎日 UTC 00:05（日本時間 09:05）に差分更新
+    entrypoint: >
+      sh -c "
+        while true; do
+          now=$$(date -u +%s);
+          next=$$(( ( ($$now / 86400) + 1 ) * 86400 + 300 ));
+          sleep $$(( $$next - $$now ));
+          python -m autoflyer update;
+        done
+      "
+
+  dashboard:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"   # localhost のみ公開（SSHトンネル経由でアクセス）
+    volumes:
+      - ./state.json:/app/state.json
+      - ./logs:/app/logs
+    command:
+      - dashboard
+      - --log-file
+      - /app/logs/bot.log
+      - --port
+      - "8080"

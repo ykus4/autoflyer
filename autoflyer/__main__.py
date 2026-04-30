@@ -150,7 +150,6 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
 def _cmd_fetch_binance(args: argparse.Namespace) -> None:
     """Binance BTC/USDT 日足を CSV に保存（バックテスト用）。"""
     import time
-    from datetime import timezone
     from pathlib import Path
 
     import pandas as pd
@@ -176,14 +175,16 @@ def _cmd_fetch_binance(args: argparse.Namespace) -> None:
         for k in batch:
             if int(k[0]) >= end_ms:
                 break
-            rows.append({
-                "timestamp_ms": int(k[0]),
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume": float(k[5]),
-            })
+            rows.append(
+                {
+                    "timestamp_ms": int(k[0]),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
+                }
+            )
         cur_ms = int(batch[-1][0]) + 1
         print(f"  fetched {len(rows)} bars ...")
         time.sleep(args.sleep)
@@ -206,7 +207,7 @@ def _cmd_fetch_binance(args: argparse.Namespace) -> None:
 def _cmd_update(args: argparse.Namespace) -> None:
     """CSVの最終日から今日まで差分取得して追記する。"""
     import time
-    from datetime import date, timedelta, timezone
+    from datetime import date
     from pathlib import Path
 
     import pandas as pd
@@ -246,14 +247,16 @@ def _cmd_update(args: argparse.Namespace) -> None:
         for k in batch:
             if int(k[0]) >= today_ms:
                 break
-            rows.append({
-                "timestamp_ms": int(k[0]),
-                "open": float(k[1]),
-                "high": float(k[2]),
-                "low": float(k[3]),
-                "close": float(k[4]),
-                "volume": float(k[5]),
-            })
+            rows.append(
+                {
+                    "timestamp_ms": int(k[0]),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
+                }
+            )
         cur_ms = int(batch[-1][0]) + 1
         time.sleep(0.3)
 
@@ -284,9 +287,11 @@ def _cmd_bot(args: argparse.Namespace) -> None:
 
 def _cmd_dashboard(args: argparse.Namespace) -> None:
     import os
-    import uvicorn
     from pathlib import Path
+
+    import uvicorn
     from dotenv import load_dotenv
+
     from .dashboard import app, set_paths
 
     load_dotenv()
@@ -298,7 +303,7 @@ def _cmd_dashboard(args: argparse.Namespace) -> None:
         api_secret=os.environ.get("BITFLYER_API_SECRET", ""),
     )
     print(f"Dashboard: http://localhost:{args.port}")
-    print("SSHトンネル: ssh -L {p}:localhost:{p} <user>@<server>".format(p=args.port))
+    print(f"SSHトンネル: ssh -L {args.port}:localhost:{args.port} <user>@<server>")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 

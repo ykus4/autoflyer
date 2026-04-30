@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -114,7 +113,7 @@ def api_equity(n: int = 500) -> dict:
         return {"labels": [], "values": []}
     try:
         lines = _EQUITY_FILE.read_text(encoding="utf-8").splitlines()
-        rows = [json.loads(l) for l in lines[-n:] if l.strip()]
+        rows = [json.loads(line) for line in lines[-n:] if line.strip()]
         labels = [r["dt"][:16].replace("T", " ") for r in rows]
         values = [round(r["equity"]) for r in rows]
         return {"labels": labels, "values": values}

@@ -18,7 +18,6 @@ import warnings
 import numpy as np
 import pandas as pd
 
-
 _GARCH_LOOKBACK = 252  # ~1 year of daily bars for estimation
 
 

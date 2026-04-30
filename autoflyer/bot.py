@@ -61,7 +61,9 @@ class BitFlyerClient:
         resp.raise_for_status()
         return resp.json()
 
-    def fetch_executions(self, product_code: str, count: int = 500, before: int | None = None) -> list[dict]:
+    def fetch_executions(
+        self, product_code: str, count: int = 500, before: int | None = None
+    ) -> list[dict]:
         params: dict = {"product_code": product_code, "count": count}
         if before is not None:
             params["before"] = before
@@ -90,8 +92,13 @@ class BitFlyerClient:
             df = (
                 df.set_index("dt")
                 .resample(rule)
-                .agg(open=("open", "first"), high=("high", "max"),
-                     low=("low", "min"), close=("close", "last"), volume=("volume", "sum"))
+                .agg(
+                    open=("open", "first"),
+                    high=("high", "max"),
+                    low=("low", "min"),
+                    close=("close", "last"),
+                    volume=("volume", "sum"),
+                )
                 .dropna()
                 .reset_index()
             )
@@ -230,7 +237,12 @@ def run(args: argparse.Namespace) -> None:
                     jpy_balance = float(bal.get("JPY", {}).get("free", 0))
                     btc_balance = float(bal.get("BTC", {}).get("free", 0))
                     cur_equity = jpy_balance + btc_balance * cur_price
-                    log.info("残高: JPY=%.0f  BTC=%.6f  資産合計=%.0f", jpy_balance, btc_balance, cur_equity)
+                    log.info(
+                        "残高: JPY=%.0f  BTC=%.6f  資産合計=%.0f",
+                        jpy_balance,
+                        btc_balance,
+                        cur_equity,
+                    )
                 except Exception:
                     cur_equity = (
                         (cur_price - entry_price_val) * btc_held + (amount_jpy or 100_000)
@@ -251,17 +263,20 @@ def run(args: argparse.Namespace) -> None:
                     dd_pct,
                     max_dd_pct,
                 )
-                if state["in_pos"] and float(state.get("btc", 0.0)) > 0:
-                    if market_order("sell", float(state["btc"])):
-                        log.critical(
-                            "CIRCUIT BREAKER: sold %.8f BTC @ ~%.0f JPY",
-                            state["btc"],
-                            cur_price,
-                        )
-                        state.update(
-                            in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
-                        )
-                        _save_state(state_file, state)
+                if (
+                    state["in_pos"]
+                    and float(state.get("btc", 0.0)) > 0
+                    and market_order("sell", float(state["btc"]))
+                ):
+                    log.critical(
+                        "CIRCUIT BREAKER: sold %.8f BTC @ ~%.0f JPY",
+                        state["btc"],
+                        cur_price,
+                    )
+                    state.update(
+                        in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
+                    )
+                    _save_state(state_file, state)
                 break
 
             if (
@@ -356,7 +371,15 @@ def _tf_to_coingecko_days(tf: str, limit: int) -> int:
 
 
 def _tf_to_seconds(tf: str) -> int:
-    mapping = {"1H": 3600, "3H": 10800, "4H": 14400, "6H": 21600, "12H": 43200, "1D": 86400, "3D": 259200}
+    mapping = {
+        "1H": 3600,
+        "3H": 10800,
+        "4H": 14400,
+        "6H": 21600,
+        "12H": 43200,
+        "1D": 86400,
+        "3D": 259200,
+    }
     v = mapping.get(tf.upper().strip())
     if v is None:
         raise ValueError(f"Unsupported timeframe: {tf}")
@@ -374,7 +397,9 @@ def _tf_to_pandas_rule(tf: str) -> str:
 def _resolve_variant(name: str) -> Variant:
     v = next((v for v in VARIANTS if v.name == name), None)
     if v is None:
-        raise SystemExit(f"Unknown variant: {name}. Run `python -m autoflyer variants` to list them.")
+        raise SystemExit(
+            f"Unknown variant: {name}. Run `python -m autoflyer variants` to list them."
+        )
     return v
 
 

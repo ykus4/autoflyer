@@ -73,10 +73,16 @@ cp .env.example .env && nano .env
 BITFLYER_API_KEY=your_key
 BITFLYER_API_SECRET=your_secret
 DRY_RUN=1                          # まずはドライランで確認
-VARIANT=MA200_STOP1.5ATR_GARCH40
-TIMEFRAME=1D
-TRADE_AMOUNT_JPY=50000
+VARIANT=MA200_STOP1.5ATR_GARCH40   # 使用するバリアント
+TIMEFRAME=1D                       # 時間足
+TRADE_AMOUNT_JPY=50000             # 1取引あたりの上限（JPY）
+DASHBOARD_USER=admin               # ダッシュボード認証（設定すると外部公開）
+DASHBOARD_PASS=changeme
 ```
+
+> **`.env` と `config.py` の違い**
+> `.env` はライブbot専用の実行時設定（環境ごとに変わる値・秘密情報）。
+> `config.py` はMAの期間やATRの長さなどアルゴリズムの定数（全環境共通）。
 
 **3. 初回データ取得**
 
@@ -296,26 +302,31 @@ python -m autoflyer variants
 ```
 autoflyer/
 ├── autoflyer/
-│   ├── __main__.py       CLI エントリポイント
-│   ├── bot.py            ライブ取引ロジック
-│   ├── backtest.py       バックテストエンジン
-│   ├── strategy.py       戦略バリアント定義
-│   ├── indicators.py     テクニカル指標（MA, ATR, ADX, RSI, MACD）
-│   ├── garch_sizing.py   GARCHボラティリティ ポジションサイジング
-│   ├── dashboard.py      監視ダッシュボード（FastAPI）
-│   ├── data.py           データ読み込み・リサンプリング
-│   ├── fees.py           bitFlyer 手数料モデル
-│   ├── config.py         定数・設定
-│   └── report.py         集計・表示
-├── var/                  実行時データ（gitignored）
+│   ├── __main__.py          CLI エントリポイント
+│   ├── config.py            アルゴリズム定数（MA期間・ATR長など全環境共通）
+│   ├── dashboard.py         監視ダッシュボード API（FastAPI）
+│   ├── trading/             ライブ取引関連
+│   │   ├── bot.py           ライブ取引ループ・BitFlyerClient
+│   │   ├── strategy.py      バリアント定義（Variant dataclass・VARIANTS）
+│   │   ├── indicators.py    テクニカル指標（MA, ATR, ADX, RSI, MACD）
+│   │   ├── garch_sizing.py  GARCHボラティリティ ポジションサイジング
+│   │   └── fees.py          bitFlyer 手数料ティアモデル
+│   ├── analysis/            バックテスト・データ分析
+│   │   ├── backtest.py      バックテストエンジン
+│   │   ├── data.py          CSV読み込み・OHLCVリサンプリング
+│   │   └── report.py        集計・表示
+│   └── templates/
+│       └── dashboard.html   ダッシュボード UI
+├── var/                     実行時データ（gitignored）
 │   ├── bot.log
 │   ├── run.log
 │   ├── run.pid
 │   ├── state.json
 │   └── btc_usdt_1d.csv
 ├── tests/
-├── run.sh                起動・停止スクリプト
-├── .env.example
+├── run.sh                   起動・停止スクリプト
+├── .env                     実行時設定（gitignored）
+├── .env.example             設定テンプレート
 └── pyproject.toml
 ```
 

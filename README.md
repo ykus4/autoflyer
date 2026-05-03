@@ -252,12 +252,6 @@ python -m autoflyer dashboard \
 python -m autoflyer variants
 ```
 
-</details>
-
----
-
-## 戦略バリアント一覧
-
 | バリアント | MA200 | ADX | ストップ | リスク% | GARCH | 説明 |
 |---|:---:|:---:|:---:|:---:|:---:|---|
 | `BASE` | | | | | | MAクロスのみ（ベースライン） |
@@ -292,6 +286,8 @@ python -m autoflyer variants
 | `MA200_SHORT_STOP3` | ✓ | | 3ATR | | | ショート両面 + MA200 |
 | `ATR_AVOID` | | | | | | 高ボラ回避 |
 | `MA200_ATRAVOID` | ✓ | | | | | 高ボラ回避 + MA200 |
+
+</details>
 
 ---
 

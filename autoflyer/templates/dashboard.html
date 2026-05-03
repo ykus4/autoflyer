@@ -181,7 +181,7 @@ async function load() {
 
   if (eq.labels.length > 1) initChart(eq.labels, eq.values);
   document.getElementById('err').textContent = tr.error ? '⚠ ' + tr.error : '';
-  document.getElementById('logs').textContent = lr.lines.join('\n');
+  document.getElementById('logs').textContent = lr.lines.slice().reverse().join('\n');
   document.getElementById('ts').textContent = '最終更新: ' + new Date().toLocaleString('ja-JP');
 }
 

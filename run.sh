@@ -3,7 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-[ -f .env ] && export $(grep -v '^#' .env | xargs)
+[ -f .env ] && set -a && source .env && set +a
 
 VAR=var
 mkdir -p "$VAR"

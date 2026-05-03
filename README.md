@@ -38,51 +38,46 @@ uv run ruff check autoflyer/ tests/
 
 ---
 
-## Production Deployment (VPS)
+## Production Deployment (GCP)
 
-### 1. Provision a VPS
+### 1. Provision a VM
 
-Recommended: [さくらのVPS](https://vps.sakura.ad.jp/), 512MB plan (~¥520/month), Ubuntu 24.04.
+GCP Compute Engine (e2-micro, Debian, `us-central1-f`).
 
 ```bash
-ssh root@<server-ip>
-curl -fsSL https://get.docker.com | sh
+sudo apt-get update && sudo apt-get install -y git
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. Transfer code
+### 2. Clone and configure
 
 ```bash
-# Run locally — excludes .env, data/, state.json
-./deploy.sh <server-ip>
-```
-
-### 3. Configure API keys
-
-Issue a bitFlyer API key with **spot trading**, **FX trading**, and **balance** permissions.
-
-```bash
-# On VPS
-cd ~/autoflyer
+git clone https://github.com/ykus4/autoflyer.git
+cd autoflyer
 cp .env.example .env
 nano .env
 ```
 
+Issue a bitFlyer API key with **spot trading**, **FX trading**, and **balance** permissions.
+
 ```env
 BITFLYER_API_KEY=your_key
 BITFLYER_API_SECRET=your_secret
+DRY_RUN=1
 ```
 
-### 4. Fetch historical data (first time only)
+### 3. Fetch historical data (first time only)
 
 ```bash
-docker compose run --rm bot fetch-binance --end 2026-04-30
+uv sync
+python -m autoflyer fetch-binance --end 2026-04-30 --output var/btc_usdt_1d.csv
 ```
 
-### 5. Start in dry-run mode
+### 4. Start in dry-run mode
 
 ```bash
-docker compose up -d
-docker compose logs -f bot
+./run.sh start
+tail -f var/run.log
 ```
 
 Expected log output:
@@ -91,19 +86,19 @@ Expected log output:
 2026-04-30 09:00:02 [INFO] cross_up=False  cross_down=False  in_pos=False  dd=0.0%
 ```
 
-### 6. Switch to live mode
+### 5. Switch to live mode
 
-Uncomment `--live` in `docker-compose.yml`, then:
+Set `DRY_RUN=0` in `.env`, then:
 
 ```bash
-docker compose down && docker compose up -d
+./run.sh restart
 ```
 
-### 7. Monitor with dashboard
+### 6. Monitor with dashboard
 
 ```bash
 # SSH tunnel from local machine
-ssh -L 8080:localhost:8080 root@<server-ip>
+ssh -L 8080:localhost:8080 <user>@<server-ip>
 ```
 
 Open `http://localhost:8080` — shows position, P&L, equity chart, and recent logs.
@@ -113,20 +108,23 @@ Open `http://localhost:8080` — shows position, P&L, equity chart, and recent l
 ## Common Commands
 
 ```bash
+# Start / stop / restart
+./run.sh start
+./run.sh stop
+./run.sh restart
+
+# Check status
+./run.sh status
+
 # Stream logs
-docker compose logs -f bot
+tail -f var/run.log
+tail -f var/bot.log
 
 # Check current position
-cat ~/autoflyer/state.json
+cat var/state.json
 
-# Stop bot
-docker compose down
-
-# Restart bot
-docker compose restart bot
-
-# Update price data
-docker compose run --rm bot update
+# Update price data manually
+python -m autoflyer update --output var/btc_usdt_1d.csv
 ```
 
 ---
@@ -147,10 +145,10 @@ python -m autoflyer fetch-binance --end 2026-04-30
 
 ### `update` — Incremental data update
 
-Appends bars from the last CSV date to today. Runs automatically every day at 09:05.
+Appends bars from the last CSV date to today. Runs automatically every day at 09:05 JST.
 
 ```bash
-python -m autoflyer update
+python -m autoflyer update --output var/btc_usdt_1d.csv
 ```
 
 ### `backtest` — Run backtest
@@ -190,7 +188,7 @@ python -m autoflyer bot --live --timeframe 1D --variant MA200_STOP1.5ATR_GARCH40
 ### `dashboard` — Monitoring dashboard
 
 ```bash
-python -m autoflyer dashboard --log-file logs/bot.log
+python -m autoflyer dashboard --log-file var/bot.log
 # → http://localhost:8080
 ```
 
@@ -218,11 +216,13 @@ autoflyer/
 │   ├── fees.py           bitFlyer fee model
 │   ├── config.py         Constants
 │   └── report.py         Aggregation and display
-├── data/                 Price data (gitignored)
-├── logs/                 Log files (gitignored)
+├── var/                  Runtime data (gitignored)
+│   ├── bot.log           Bot log
+│   ├── run.log           All process output
+│   ├── state.json        Position state
+│   └── btc_usdt_1d.csv   Price data
+├── run.sh                Start/stop script
 ├── .env.example          Env var template
-├── docker-compose.yml    Production Docker config
-├── Dockerfile
 └── pyproject.toml
 ```
 

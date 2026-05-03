@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/ykus4/autoflyer/actions/workflows/ci.yml/badge.svg)](https://github.com/ykus4/autoflyer/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
-![License](https://img.shields.io/badge/license-Apache%202.0-blue)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 > [!WARNING]
 > **本ソフトウェアは教育・研究目的で公開しています。**

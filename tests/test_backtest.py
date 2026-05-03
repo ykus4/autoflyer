@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autoflyer.backtest import _apply_slippage, compute_signal, run
+from autoflyer.analysis.backtest import _apply_slippage, compute_signal, run
 from autoflyer.config import START_CASH_JPY
-from autoflyer.strategy import Variant
+from autoflyer.trading.strategy import Variant
 
 
 def _make_bars(n: int = 500, seed: int = 0) -> pd.DataFrame:

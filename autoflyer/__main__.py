@@ -80,10 +80,10 @@ def _cmd_fetch(args: argparse.Namespace) -> None:
 def _cmd_backtest(args: argparse.Namespace) -> None:
     import pandas as pd
 
-    from . import backtest, data, report
+    from .analysis import backtest, data, report
     from .config import START_CASH_JPY, TIMEFRAMES
-    from .indicators import add_indicators
-    from .strategy import VARIANTS
+    from .trading.indicators import add_indicators
+    from .trading.strategy import VARIANTS
 
     timeframes = args.timeframe or TIMEFRAMES
     variants = [v for v in VARIANTS if v.name in args.variant] if args.variant else VARIANTS
@@ -280,7 +280,7 @@ def _cmd_update(args: argparse.Namespace) -> None:
 
 
 def _cmd_bot(args: argparse.Namespace) -> None:
-    from .bot import run
+    from .trading.bot import run
 
     run(args)
 
@@ -314,7 +314,7 @@ def _cmd_dashboard(args: argparse.Namespace) -> None:
 
 
 def _cmd_variants(_args: argparse.Namespace) -> None:
-    from .strategy import VARIANTS
+    from .trading.strategy import VARIANTS
 
     print(
         f"{'Name':<26} {'ma200':^5} {'adx_min':^7} {'stop':^5} {'risk%':^6} {'short':^5} {'chan':^5}"

@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from autoflyer.fees import FeeTierModel, rate_for_volume
+from autoflyer.trading.fees import FeeTierModel, rate_for_volume
 
 
 class TestRateForVolume:

@@ -15,6 +15,7 @@ from .bot import BitFlyerClient
 
 app = FastAPI(title="autoflyer dashboard")
 _security = HTTPBasic()
+_security_dep = Depends(_security)
 
 _STATE_FILE = Path("state.json")
 _EQUITY_FILE = Path("equity.jsonl")
@@ -44,11 +45,12 @@ def set_paths(
     _DASHBOARD_PASS = dashboard_pass
 
 
-def _auth(credentials: HTTPBasicCredentials = Depends(_security)) -> str:
+def _auth(credentials: HTTPBasicCredentials = _security_dep) -> str:
     if not _DASHBOARD_USER:
         return credentials.username
-    ok = secrets.compare_digest(credentials.username, _DASHBOARD_USER) and \
-         secrets.compare_digest(credentials.password, _DASHBOARD_PASS)
+    ok = secrets.compare_digest(credentials.username, _DASHBOARD_USER) and secrets.compare_digest(
+        credentials.password, _DASHBOARD_PASS
+    )
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

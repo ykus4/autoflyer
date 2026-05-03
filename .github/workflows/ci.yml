@@ -31,4 +31,4 @@ jobs:
       - name: Import smoke test
         run: |
           uv run python -c "from autoflyer.dashboard import app; print('dashboard ok')"
-          uv run python -c "from autoflyer.garch_sizing import garch_position_fraction; print('garch ok')"
+          uv run python -c "from autoflyer.trading.garch_sizing import garch_position_fraction; print('garch ok')"

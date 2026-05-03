@@ -55,13 +55,14 @@ start() {
 }
 
 stop() {
-  if [ ! -f "$PIDFILE" ]; then
-    echo "PIDファイルが見つかりません"
-    exit 1
-  fi
   echo "→ 停止します..."
-  kill $(cat "$PIDFILE") 2>/dev/null || true
-  rm -f "$PIDFILE"
+  # PIDファイルに記録されたプロセスを終了
+  if [ -f "$PIDFILE" ]; then
+    kill $(cat "$PIDFILE") 2>/dev/null || true
+    rm -f "$PIDFILE"
+  fi
+  # ポート8080を占有しているプロセスも強制終了
+  fuser -k 8080/tcp 2>/dev/null || true
   echo "✓ 停止しました"
 }
 

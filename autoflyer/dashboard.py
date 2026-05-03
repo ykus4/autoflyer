@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from .bot import BitFlyerClient
 
 app = FastAPI(title="autoflyer dashboard")
+_security = HTTPBasic()
+_security_dep = Depends(_security)
 
 _STATE_FILE = Path("state.json")
 _EQUITY_FILE = Path("equity.jsonl")
 _LOG_FILE: Path | None = None
 _SYMBOL = "FX_BTC_JPY"
 _ex: BitFlyerClient | None = None
+_DASHBOARD_USER = ""
+_DASHBOARD_PASS = ""
 
 
 def set_paths(
@@ -26,13 +32,31 @@ def set_paths(
     symbol: str = "FX_BTC_JPY",
     api_key: str = "",
     api_secret: str = "",
+    dashboard_user: str = "",
+    dashboard_pass: str = "",
 ) -> None:
-    global _STATE_FILE, _EQUITY_FILE, _LOG_FILE, _SYMBOL, _ex
+    global _STATE_FILE, _EQUITY_FILE, _LOG_FILE, _SYMBOL, _ex, _DASHBOARD_USER, _DASHBOARD_PASS
     _STATE_FILE = state
     _EQUITY_FILE = state.with_name("equity.jsonl")
     _LOG_FILE = log
     _SYMBOL = symbol
     _ex = BitFlyerClient(api_key, api_secret)
+    _DASHBOARD_USER = dashboard_user
+    _DASHBOARD_PASS = dashboard_pass
+
+
+def _auth(credentials: HTTPBasicCredentials = _security_dep) -> str:
+    if not _DASHBOARD_USER:
+        return credentials.username
+    ok = secrets.compare_digest(credentials.username, _DASHBOARD_USER) and secrets.compare_digest(
+        credentials.password, _DASHBOARD_PASS
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 
 def _read_state() -> dict:
@@ -55,12 +79,12 @@ def _read_logs(n: int = 80) -> list[str]:
 
 
 @app.get("/api/state")
-def api_state() -> dict:
+def api_state(_: str = Depends(_auth)) -> dict:
     return _read_state()
 
 
 @app.get("/api/ticker")
-def api_ticker() -> dict:
+def api_ticker(_: str = Depends(_auth)) -> dict:
     """現在価格・含み損益・残高をccxtで取得して返す。"""
     state = _read_state()
     result: dict = {
@@ -107,7 +131,7 @@ def api_ticker() -> dict:
 
 
 @app.get("/api/equity")
-def api_equity(n: int = 500) -> dict:
+def api_equity(n: int = 500, _: str = Depends(_auth)) -> dict:
     """直近n件の資産推移を返す。"""
     if not _EQUITY_FILE.exists():
         return {"labels": [], "values": []}
@@ -122,12 +146,12 @@ def api_equity(n: int = 500) -> dict:
 
 
 @app.get("/api/logs")
-def api_logs(n: int = 80) -> dict:
+def api_logs(n: int = 80, _: str = Depends(_auth)) -> dict:
     return {"lines": _read_logs(n)}
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
+def index(_: str = Depends(_auth)) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return f"""<!DOCTYPE html>
 <html lang="ja">

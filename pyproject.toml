@@ -12,6 +12,7 @@ dependencies = [
   "pyarrow>=22.0.0",
   "arch>=8.0.0",
   "fastapi>=0.110",
+  "jinja2>=3.1",
   "uvicorn>=0.29",
 ]
 

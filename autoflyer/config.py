@@ -28,4 +28,4 @@ SHOW_LAST_N_MONTHS = 24
 TZ_DISPLAY = "Asia/Tokyo"
 
 # 後方互換: 既存 import が `from .config import Variant, VARIANTS` でも動く
-from .strategy import VARIANTS, Variant  # noqa: E402, F401
+from .trading.strategy import VARIANTS, Variant  # noqa: E402, F401

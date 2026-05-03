@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from autoflyer.indicators import add_indicators, adx, atr, macd, rsi
+from autoflyer.trading.indicators import add_indicators, adx, atr, macd, rsi
 
 
 def _bars(n: int = 100, seed: int = 42) -> pd.DataFrame:

@@ -6,7 +6,7 @@ import math
 
 import pandas as pd
 
-from .config import SHOW_LAST_N_MONTHS, TZ_DISPLAY
+from ..config import SHOW_LAST_N_MONTHS, TZ_DISPLAY
 
 
 def print_overall_summary(trades: pd.DataFrame) -> None:

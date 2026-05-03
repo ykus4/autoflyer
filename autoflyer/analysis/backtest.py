@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from .config import (
+from ..config import (
     ADX_LEN,
     ATR_LEN,
     ATR_Q_LOOKBACK,
@@ -16,9 +16,9 @@ from .config import (
     MACD_SLOW,
     REGIME_MA_LEN,
 )
-from .fees import FeeTierModel
-from .indicators import add_indicators
-from .strategy import Variant
+from ..trading.fees import FeeTierModel
+from ..trading.indicators import add_indicators
+from ..trading.strategy import Variant
 
 _WARMUP = max(MA_SLOW, REGIME_MA_LEN, MACD_SLOW, ADX_LEN, ATR_LEN, DON_TERM, ATR_Q_LOOKBACK) + 3
 
@@ -83,7 +83,7 @@ def compute_live_stop(
         return None
     x = bars.iloc[:-1].copy().reset_index(drop=True)
     if x.empty or "atr" not in x.columns:
-        from .indicators import atr as calc_atr
+        from ..trading.indicators import atr as calc_atr
 
         x["atr"] = calc_atr(x)
     cur_atr = float(x["atr"].iloc[-1]) if pd.notna(x["atr"].iloc[-1]) else 0.0
@@ -369,7 +369,7 @@ def _garch_fraction(
 ) -> float:
     if v.garch_target_vol <= 0:
         return 1.0
-    from .garch_sizing import garch_position_fraction
+    from ..trading.garch_sizing import garch_position_fraction
 
     key = (len(close), v.garch_target_vol)
     if key not in cache:

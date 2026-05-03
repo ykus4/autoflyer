@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .config import (
+from ..config import (
     ADX_LEN,
     ATR_LEN,
     ATR_Q_LOOKBACK,

@@ -18,7 +18,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from .backtest import compute_live_stop, compute_signal
+from ..analysis.backtest import compute_live_stop, compute_signal
 from .fees import FeeTierModel
 from .indicators import add_indicators
 from .strategy import VARIANTS, Variant

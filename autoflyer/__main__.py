@@ -295,20 +295,16 @@ def _cmd_dashboard(args: argparse.Namespace) -> None:
     from .dashboard import app, set_paths
 
     load_dotenv()
-    user = os.environ.get("DASHBOARD_USER", "")
-    passwd = os.environ.get("DASHBOARD_PASS", "")
     set_paths(
         state=Path(args.state),
         log=Path(args.log_file) if args.log_file else None,
         symbol=args.symbol,
         api_key=os.environ.get("BITFLYER_API_KEY", ""),
         api_secret=os.environ.get("BITFLYER_API_SECRET", ""),
-        dashboard_user=user,
-        dashboard_pass=passwd,
     )
-    host = "0.0.0.0" if user else "127.0.0.1"
     print(f"Dashboard: http://localhost:{args.port}")
-    uvicorn.run(app, host=host, port=args.port, log_level="warning")
+    print(f"SSHトンネル: ssh -L {args.port}:localhost:{args.port} <user>@<server>")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 
 def _cmd_variants(_args: argparse.Namespace) -> None:

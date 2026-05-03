@@ -21,6 +21,7 @@ state.json.tmp
 equity.jsonl
 logs/
 !logs/.gitkeep
+var/
 
 # エディタ
 .vscode/

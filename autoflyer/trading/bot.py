@@ -11,7 +11,7 @@ import logging.handlers
 import os
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -403,6 +403,14 @@ def _resolve_variant(name: str) -> Variant:
     return v
 
 
+class _JSTFormatter(logging.Formatter):
+    _JST = timezone(timedelta(hours=9))
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        dt = datetime.fromtimestamp(record.created, tz=self._JST)
+        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+
+
 def _setup_logging(
     log_file: str | None,
     symbol: str,
@@ -412,6 +420,7 @@ def _setup_logging(
     max_dd_pct: float,
 ) -> logging.Logger:
     fmt = "%(asctime)s [%(levelname)s] %(message)s"
+    formatter = _JSTFormatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if log_file:
         handlers.append(
@@ -419,9 +428,9 @@ def _setup_logging(
                 log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
             )
         )
-    logging.basicConfig(
-        level=logging.INFO, format=fmt, datefmt="%Y-%m-%d %H:%M:%S", handlers=handlers
-    )
+    for h in handlers:
+        h.setFormatter(formatter)
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
     log = logging.getLogger("autoflyer.bot")
     log.info(
         "Bot start — symbol=%s  tf=%s  variant=%s  dry_run=%s  max_dd=%.1f%%",

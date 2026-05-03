@@ -40,7 +40,7 @@ start() {
   ) &
   UPDATER_PID=$!
 
-  echo "→ ダッシュボードを起動します (http://localhost:8080)..."
+  echo "→ ダッシュボードを起動します (http://$(hostname -I | awk '{print $1}'):80)..."
   uv run python -m autoflyer dashboard \
     --state "$VAR/state.json" \
     --log-file "$VAR/bot.log" \

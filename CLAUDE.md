@@ -7,41 +7,38 @@ BitFlyer FX_BTC_JPY automated trading bot using a MA-cross strategy. Single CLI 
 ```
 autoflyer/
 ├── autoflyer/
-│   ├── __main__.py       CLI entry point
-│   ├── bot.py            Live trading bot
-│   ├── backtest.py       Backtesting engine
-│   ├── strategy.py       Strategy variant definitions
-│   ├── indicators.py     Technical indicators (MA, ATR, ADX, RSI, MACD)
-│   ├── garch_sizing.py   GARCH volatility-based position sizing
-│   ├── dashboard.py      Monitoring dashboard (FastAPI, port 8080)
-│   ├── data.py           CSV loading and OHLCV resampling
-│   ├── fees.py           bitFlyer fee tier model
-│   ├── config.py         Constants and configuration
-│   └── report.py         Aggregation and display
+│   ├── __main__.py          CLI entry point
+│   ├── config.py            Algorithm constants (MA periods, ATR length, etc.)
+│   ├── dashboard.py         Monitoring dashboard API (FastAPI, port 8080)
+│   ├── trading/             Live trading
+│   │   ├── bot.py           Live trading loop, BitFlyerClient
+│   │   ├── strategy.py      Variant definitions (Variant dataclass, VARIANTS)
+│   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD)
+│   │   ├── garch_sizing.py  GARCH volatility-based position sizing
+│   │   └── fees.py          bitFlyer fee tier model
+│   ├── analysis/            Backtesting and data
+│   │   ├── backtest.py      Vectorized backtest engine
+│   │   ├── data.py          CSV loading and OHLCV resampling
+│   │   └── report.py        Aggregation and display
+│   └── templates/
+│       └── dashboard.html   Dashboard UI
+├── var/                     Runtime data (gitignored)
 ├── tests/
-├── data/                 Price data (gitignored)
-├── logs/                 Log files (gitignored)
-├── state.json            Live bot position state (gitignored)
-├── .env                  Credentials (gitignored)
-├── .env.example          Env var template
-├── docker-compose.yml    Production Docker setup
-├── Dockerfile
+├── .env                     Runtime config (gitignored)
+├── .env.example             Env var template
+├── run.sh                   Start/stop script
 └── pyproject.toml
 ```
 
 ## Commands
 
 ```bash
-# Install dependencies
 uv sync
-
-# Run CLI
 python -m autoflyer <command>
 ```
 
 | Command | Description |
 |---|---|
-| `fetch` | Fetch 1-minute OHLCV from GMO Coin |
 | `fetch-binance` | Fetch daily OHLCV from Binance (for backtesting) |
 | `update` | Append new bars to existing CSV |
 | `backtest` | Run backtest across variants and timeframes |
@@ -67,44 +64,24 @@ uv run mypy autoflyer/
 - GARCH 40% position sizing: reduces size during high volatility
 - Results: CAGR 29.1%, Max DD 24.3%, Calmar 1.20
 
-## Environment Variables (`.env`)
+## Configuration
+
+**`.env`** — runtime config (per-environment, gitignored)
 
 | Variable | Description |
 |---|---|
 | `BITFLYER_API_KEY` | bitFlyer API key |
 | `BITFLYER_API_SECRET` | bitFlyer API secret |
-| `DRY_RUN` | `1` = dry run (no real orders), `0` = live |
+| `DRY_RUN` | `1` = dry run, `0` = live |
 | `SYMBOL` | Trading pair (default: `FX_BTC_JPY`) |
-| `TIMEFRAME` | Candle timeframe (`1D`, `12H`, etc.) |
+| `TIMEFRAME` | Candle timeframe for live bot (`1D`, `12H`, etc.) |
 | `VARIANT` | Strategy variant name |
-| `TRADE_AMOUNT_JPY` | Max trade size in JPY (`0` = use full balance) |
+| `TRADE_AMOUNT_JPY` | Max trade size in JPY (`0` = full balance) |
 | `POLL_INTERVAL_SEC` | Bot polling interval in seconds |
+| `DASHBOARD_USER` | Basic auth username (enables external access when set) |
+| `DASHBOARD_PASS` | Basic auth password |
 
-## Bot Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `--live` | false | Enable real order submission |
-| `--variant` | `STOP_3ATR` | Strategy variant |
-| `--timeframe` | `1D` | Candle timeframe |
-| `--amount` | `0` | Trade size cap in JPY |
-| `--max-dd-pct` | `20.0` | Circuit breaker drawdown threshold (%) |
-| `--interval` | `60` | Polling interval (seconds) |
-| `--state` | `state.json` | Position state file path |
-
-## Deployment (Production VPS)
-
-```bash
-# Transfer code to VPS (excludes .env, data/, state.json)
-./deploy.sh <server-ip>
-
-# On VPS: start with Docker Compose
-docker compose up -d
-
-# SSH tunnel to access dashboard locally
-ssh -L 8080:localhost:8080 root@<server-ip>
-# then open http://localhost:8080
-```
+**`config.py`** — algorithm constants (same across all environments): MA periods, ATR length, indicator parameters.
 
 ## Git Commit Rules
 
@@ -114,7 +91,8 @@ ssh -L 8080:localhost:8080 root@<server-ip>
 
 ## Key Files
 
-- [autoflyer/strategy.py](autoflyer/strategy.py) — add/modify strategy variants (`Variant` dataclass, `VARIANTS` list)
-- [autoflyer/bot.py](autoflyer/bot.py) — live order logic, circuit breaker, state persistence
-- [autoflyer/backtest.py](autoflyer/backtest.py) — vectorized backtest engine
+- [autoflyer/trading/strategy.py](autoflyer/trading/strategy.py) — add/modify strategy variants
+- [autoflyer/trading/bot.py](autoflyer/trading/bot.py) — live order logic, circuit breaker, state persistence
+- [autoflyer/analysis/backtest.py](autoflyer/analysis/backtest.py) — vectorized backtest engine
 - [autoflyer/config.py](autoflyer/config.py) — constants (`START_CASH_JPY`, `TIMEFRAMES`, etc.)
+- [autoflyer/templates/dashboard.html](autoflyer/templates/dashboard.html) — dashboard UI

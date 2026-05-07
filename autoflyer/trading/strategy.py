@@ -25,6 +25,15 @@ class Variant:
     # エグジット: チャンデリアトレーリングストップ（ピーク ∓ ATR × mult）
     chandelier_mult: float = 0.0
 
+    # エグジット: 利確ターゲット（エントリー価格 + ATR × tp_atr_mult, 0 = 無効）
+    tp_atr_mult: float = 0.0
+
+    # エグジット: 利確後トレーリングへ移行（tp到達後、chandelier的にストップを追従）
+    tp_trail_mult: float = 0.0
+
+    # エントリー: ドンチャンブレイクアウトエントリー（MA クロスではなくブレイクアウトでエントリー）
+    breakout_entry: bool = False
+
     # サイジング: 残高 × risk_pct% をストップ幅でリスク管理（0 = 全額投入）
     risk_pct: float = 0.0
 
@@ -33,6 +42,22 @@ class Variant:
 
     # GARCH(1,1) ボラティリティターゲット（0 = 無効、例: 0.20 = 年率20%を目標に動的サイジング）
     garch_target_vol: float = 0.0
+
+    # --- 統計フィルター ---
+    # Hurst指数フィルター: H > hurst_min のときのみエントリー（0 = 無効）
+    hurst_min: float = 0.0
+
+    # HMMレジームフィルター: bull(2)のときのみエントリー（MA200の代替）
+    use_hmm_regime: bool = False
+
+    # Kelly基準サイジング: GARCHの代わりにKellyでサイズ決定
+    use_kelly_sizing: bool = False
+
+    # ブレイクアウトz-scoreフィルター: z > zscore_min のときのみエントリー（0 = 無効）
+    zscore_min: float = 0.0
+
+    # MAEベースストップ: 過去の逆行統計からストップ幅を動的計算（atr_stop_multの代替）
+    use_mae_stop: bool = False
 
 
 VARIANTS: list[Variant] = [
@@ -81,4 +106,218 @@ VARIANTS: list[Variant] = [
     # ショート両面対応
     Variant("SHORT_STOP3", enable_short=True, atr_stop_mult=3.0),
     Variant("MA200_SHORT_STOP3", use_ma200_filter=True, enable_short=True, atr_stop_mult=3.0),
+    # === 利確ロジック付きバリアント ===
+    # ATRベース利確ターゲット（ストップの2〜4倍のR倍率で利確）
+    Variant(
+        "MA200_STOP1.5_TP3ATR_GARCH40",
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=3.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "MA200_STOP1.5_TP4ATR_GARCH40",
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=4.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "MA200_STOP1.5_TP6ATR_GARCH40",
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=6.0,
+        garch_target_vol=0.40,
+    ),
+    # 利確到達後トレーリングに移行（利益を伸ばす）
+    Variant(
+        "MA200_STOP1.5_TP3_TRAIL2_GARCH40",
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=3.0,
+        tp_trail_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "MA200_STOP1.5_TP4_TRAIL2_GARCH40",
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=4.0,
+        tp_trail_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "MA200_STOP2_TP4_TRAIL2_GARCH30",
+        use_ma200_filter=True,
+        atr_stop_mult=2.0,
+        tp_atr_mult=4.0,
+        tp_trail_mult=2.0,
+        garch_target_vol=0.30,
+    ),
+    # === ドンチャンブレイクアウトエントリー ===
+    Variant(
+        "BREAKOUT_STOP2_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "BREAKOUT_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "BREAKOUT_STOP2_TP4_TRAIL2_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=2.0,
+        tp_atr_mult=4.0,
+        tp_trail_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "BREAKOUT_STOP1.5_TP3_TRAIL2_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=3.0,
+        tp_trail_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    # === ハイブリッド: MAクロス + ブレイクアウト確認 + 利確トレーリング ===
+    Variant(
+        "HYBRID_DON_STOP1.5_TP4_TRAIL2_GARCH40",
+        use_ma200_filter=True,
+        require_don_break=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=4.0,
+        tp_trail_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "HYBRID_DON_STOP2_TP6_TRAIL3_GARCH40",
+        use_ma200_filter=True,
+        require_don_break=True,
+        atr_stop_mult=2.0,
+        tp_atr_mult=6.0,
+        tp_trail_mult=3.0,
+        garch_target_vol=0.40,
+    ),
+    # リスクベース + 利確
+    Variant(
+        "MA200_RISK2_STOP2_TP4_GARCH30",
+        use_ma200_filter=True,
+        atr_stop_mult=2.0,
+        tp_atr_mult=4.0,
+        risk_pct=2.0,
+        garch_target_vol=0.30,
+    ),
+    Variant(
+        "MA200_RISK2_STOP1.5_TP3_TRAIL2_GARCH40",
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        tp_atr_mult=3.0,
+        tp_trail_mult=2.0,
+        risk_pct=2.0,
+        garch_target_vol=0.40,
+    ),
+    # === 統計フィルター バリアント ===
+    # Hurst指数: トレンド確認済みのみエントリー
+    Variant(
+        "BREAKOUT_HURST55_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+        hurst_min=0.55,
+    ),
+    Variant(
+        "BREAKOUT_HURST60_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+        hurst_min=0.60,
+    ),
+    # HMMレジーム: MA200の代わりに統計的レジーム判定
+    Variant(
+        "BREAKOUT_HMM_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_hmm_regime=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "BREAKOUT_HMM_HURST55_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_hmm_regime=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+        hurst_min=0.55,
+    ),
+    # Kelly基準サイジング: GARCHの代わりにKelly
+    Variant(
+        "BREAKOUT_MA200_STOP1.5_KELLY",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        use_kelly_sizing=True,
+    ),
+    # z-scoreフィルター: 統計的に有意なブレイクアウトのみ
+    Variant(
+        "BREAKOUT_Z2_MA200_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+        zscore_min=2.0,
+    ),
+    Variant(
+        "BREAKOUT_Z1.5_MA200_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+        zscore_min=1.5,
+    ),
+    # MAEベースストップ: 統計的に最適なストップ幅
+    Variant(
+        "BREAKOUT_MAE_MA200_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        garch_target_vol=0.40,
+        use_mae_stop=True,
+    ),
+    # フル統計: 全部入り
+    Variant(
+        "STAT_FULL_BREAKOUT",
+        breakout_entry=True,
+        use_hmm_regime=True,
+        garch_target_vol=0.40,
+        hurst_min=0.55,
+        zscore_min=1.5,
+        use_mae_stop=True,
+    ),
+    # Kelly + Hurst + MA200
+    Variant(
+        "BREAKOUT_HURST55_MA200_KELLY",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        use_kelly_sizing=True,
+        hurst_min=0.55,
+    ),
+    # GARCH + Hurst + z-score (統計サイジング + 統計フィルター)
+    Variant(
+        "BREAKOUT_HURST55_Z1.5_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+        hurst_min=0.55,
+        zscore_min=1.5,
+    ),
 ]

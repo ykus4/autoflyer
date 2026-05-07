@@ -18,6 +18,13 @@ from ..config import (
 )
 from ..trading.fees import FeeTierModel
 from ..trading.indicators import add_indicators
+from ..trading.stats_filters import (
+    breakout_zscore,
+    hmm_regime,
+    hurst_exponent,
+    kelly_fraction,
+    mae_optimal_stop,
+)
 from ..trading.strategy import Variant
 
 _WARMUP = max(MA_SLOW, REGIME_MA_LEN, MACD_SLOW, ADX_LEN, ATR_LEN, DON_TERM, ATR_Q_LOOKBACK) + 3
@@ -34,6 +41,8 @@ _DIAG_COLS = [
     "macd_hist",
     "macd_up",
     "don_break_up",
+    "don_high",
+    "don_low",
 ]
 
 
@@ -46,6 +55,8 @@ class _Position:
     entry_fee_rate: float
     stop_px: float | None = None
     trail_best: float | None = None
+    tp_px: float | None = None  # 利確ターゲット
+    tp_hit: bool = False  # 利確到達フラグ（トレーリング移行用）
 
 
 def compute_signal(bars: pd.DataFrame) -> tuple[bool, bool]:
@@ -163,7 +174,7 @@ def run(
         )
 
         # チャンデリア追跡ストップ更新（バーごとにピークを更新）
-        if pos is not None and v.chandelier_mult > 0 and cur_atr > 0:
+        if pos is not None and v.chandelier_mult > 0 and cur_atr > 0 and not pos.tp_hit:
             if pos.side == "long":
                 pos.trail_best = max(pos.trail_best or float(cur["high"]), float(cur["high"]))
                 pos.stop_px = pos.trail_best - v.chandelier_mult * cur_atr
@@ -172,11 +183,50 @@ def run(
                 pos.stop_px = pos.trail_best + v.chandelier_mult * cur_atr
 
         # 固定 ATR ストップも毎バー最新 ATR で更新（エントリー価格は固定）
-        if pos is not None and v.atr_stop_mult > 0 and v.chandelier_mult == 0 and cur_atr > 0:
+        if (
+            pos is not None
+            and v.atr_stop_mult > 0
+            and v.chandelier_mult == 0
+            and cur_atr > 0
+            and not pos.tp_hit
+        ):
             if pos.side == "long":
                 pos.stop_px = pos.entry_price - v.atr_stop_mult * cur_atr
             else:
                 pos.stop_px = pos.entry_price + v.atr_stop_mult * cur_atr
+
+        # 利確到達判定 & トレーリング移行
+        if pos is not None and pos.tp_px is not None and not pos.tp_hit:
+            tp_triggered = (pos.side == "long" and float(cur["high"]) >= pos.tp_px) or (
+                pos.side == "short" and float(cur["low"]) <= pos.tp_px
+            )
+            if tp_triggered:
+                if v.tp_trail_mult > 0 and cur_atr > 0:
+                    # 利確到達 → トレーリングストップに移行
+                    pos.tp_hit = True
+                    if pos.side == "long":
+                        pos.trail_best = float(cur["high"])
+                        pos.stop_px = pos.trail_best - v.tp_trail_mult * cur_atr
+                    else:
+                        pos.trail_best = float(cur["low"])
+                        pos.stop_px = pos.trail_best + v.tp_trail_mult * cur_atr
+                else:
+                    # トレーリングなし → 即利確決済
+                    exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
+                    cash = _close(
+                        trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, "tp"
+                    )
+                    pos = None
+                    continue
+
+        # 利確後トレーリング更新
+        if pos is not None and pos.tp_hit and v.tp_trail_mult > 0 and cur_atr > 0:
+            if pos.side == "long":
+                pos.trail_best = max(pos.trail_best or float(cur["high"]), float(cur["high"]))
+                pos.stop_px = pos.trail_best - v.tp_trail_mult * cur_atr
+            else:
+                pos.trail_best = min(pos.trail_best or float(cur["low"]), float(cur["low"]))
+                pos.stop_px = pos.trail_best + v.tp_trail_mult * cur_atr
 
         # ストップ発動
         if pos is not None and pos.stop_px is not None:
@@ -184,9 +234,10 @@ def run(
                 pos.side == "short" and float(cur["high"]) >= pos.stop_px
             )
             if hit:
+                reason = "trail_stop" if pos.tp_hit else "stop"
                 exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
                 cash = _close(
-                    trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, "stop"
+                    trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, reason
                 )
                 pos = None
                 cooldown_remaining = v.cooldown_bars
@@ -195,9 +246,23 @@ def run(
         cross_up = _cross_up(cur, prev)
         cross_down = _cross_down(cur, prev)
 
-        # クロスによるエグジット（train 期間でも決済はする）
-        if pos is not None and (
-            (pos.side == "long" and cross_down) or (pos.side == "short" and cross_up)
+        # ブレイクアウトエントリーモードのシグナル
+        if v.breakout_entry:
+            breakout_up = bool(
+                pd.notna(cur.get("don_high")) and float(cur["high"]) > float(cur["don_high"])
+            )
+            breakout_down = bool(
+                pd.notna(cur.get("don_low")) and float(cur["low"]) < float(cur["don_low"])
+            )
+        else:
+            breakout_up = False
+            breakout_down = False
+
+        # クロスによるエグジット（train 期間でも決済はする）— 利確トレーリング中は除外
+        if (
+            pos is not None
+            and not pos.tp_hit
+            and ((pos.side == "long" and cross_down) or (pos.side == "short" and cross_up))
         ):
             exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
             cash = _close(
@@ -207,16 +272,41 @@ def run(
 
         # エントリー（test 期間のみ、クールダウン中はスキップ）
         if pos is None and i >= trade_start_idx and cooldown_remaining == 0:
-            if cross_up and _long_ok(cur, v):
+            # エントリーシグナル: ブレイクアウトモードならブレイクアウト、通常はMAクロス
+            entry_long = breakout_up if v.breakout_entry else cross_up
+            entry_short = breakout_down if v.breakout_entry else cross_down
+
+            # 統計フィルター用の close 履歴
+            close_hist = x["close"].iloc[: i + 1]
+
+            if entry_long and _long_ok(cur, v, close_hist):
                 raw_px = float(nxt["open"])
                 px = _apply_slippage(raw_px, "long", "entry", slippage_pct)
-                stop_px = (
-                    (px - v.atr_stop_mult * cur_atr)
-                    if v.atr_stop_mult > 0 and cur_atr > 0
-                    else None
+
+                # MAEベースストップ or 固定ATRストップ
+                if v.use_mae_stop and cur_atr > 0:
+                    atr_hist = x["atr"].iloc[: i + 1] if "atr" in x.columns else None
+                    if atr_hist is not None:
+                        mae_mult = mae_optimal_stop(close_hist, atr_hist)
+                        stop_px = px - mae_mult * cur_atr
+                    else:
+                        stop_px = px - 1.5 * cur_atr
+                elif v.atr_stop_mult > 0 and cur_atr > 0:
+                    stop_px = px - v.atr_stop_mult * cur_atr
+                else:
+                    stop_px = None
+
+                tp_px = (
+                    (px + v.tp_atr_mult * cur_atr) if v.tp_atr_mult > 0 and cur_atr > 0 else None
                 )
-                garch_frac = _garch_fraction(x["close"].iloc[: i + 1], v, garch_cache)
-                btc = _size(cash, px, stop_px, fees.rate, v, garch_frac)
+
+                # サイジング: Kelly or GARCH
+                if v.use_kelly_sizing:
+                    sizing_frac = kelly_fraction(close_hist)
+                else:
+                    sizing_frac = _garch_fraction(close_hist, v, garch_cache)
+
+                btc = _size(cash, px, stop_px, fees.rate, v, sizing_frac)
                 cash -= btc * px * (1.0 + fees.rate)
                 fees.record_fill(pd.Timestamp(nxt["dt"]), btc * px)
                 pos = _Position(
@@ -227,15 +317,19 @@ def run(
                     entry_fee_rate=fees.rate,
                     stop_px=stop_px,
                     trail_best=float(cur["high"]) if v.chandelier_mult > 0 else None,
+                    tp_px=tp_px,
                 )
 
-            elif cross_down and v.enable_short and _short_ok(cur, v):
+            elif entry_short and v.enable_short and _short_ok(cur, v):
                 raw_px = float(nxt["open"])
                 px = _apply_slippage(raw_px, "short", "entry", slippage_pct)
                 stop_px = (
                     (px + v.atr_stop_mult * cur_atr)
                     if v.atr_stop_mult > 0 and cur_atr > 0
                     else None
+                )
+                tp_px = (
+                    (px - v.tp_atr_mult * cur_atr) if v.tp_atr_mult > 0 and cur_atr > 0 else None
                 )
                 garch_frac = _garch_fraction(x["close"].iloc[: i + 1], v, garch_cache)
                 btc = _size(cash, px, stop_px, fees.rate, v, garch_frac)
@@ -249,6 +343,7 @@ def run(
                     entry_fee_rate=fees.rate,
                     stop_px=stop_px,
                     trail_best=float(cur["low"]) if v.chandelier_mult > 0 else None,
+                    tp_px=tp_px,
                 )
 
     return pd.DataFrame(trades), pd.DataFrame(equity_rows)
@@ -325,9 +420,13 @@ def _cross_down(cur: pd.Series, prev: pd.Series) -> bool:
     return prev["ma_fast"] >= prev["ma_slow"] and cur["ma_fast"] < cur["ma_slow"]
 
 
-def _long_ok(cur: pd.Series, v: Variant) -> bool:
+def _long_ok(cur: pd.Series, v: Variant, close_hist: pd.Series | None = None) -> bool:
     if v.use_ma200_filter and int(cur.get("regime_up", 0)) != 1:
         return False
+    if v.use_hmm_regime and close_hist is not None:
+        regime = hmm_regime(close_hist)
+        if regime != 2:  # bull only
+            return False
     if v.rsi_min is not None and (pd.isna(cur.get("rsi")) or float(cur["rsi"]) < v.rsi_min):
         return False
     if (
@@ -339,9 +438,19 @@ def _long_ok(cur: pd.Series, v: Variant) -> bool:
         return False
     if v.require_don_break and int(cur.get("don_break_up", 0)) != 1:
         return False
-    return not (
-        v.adx_min is not None and (pd.isna(cur.get("adx")) or float(cur["adx"]) < v.adx_min)
-    )
+    if v.adx_min is not None and (pd.isna(cur.get("adx")) or float(cur["adx"]) < v.adx_min):
+        return False
+    # Hurst exponent filter
+    if v.hurst_min > 0 and close_hist is not None:
+        h = hurst_exponent(close_hist)
+        if h < v.hurst_min:
+            return False
+    # Breakout z-score filter
+    if v.zscore_min > 0 and close_hist is not None:
+        z = breakout_zscore(close_hist)
+        if z < v.zscore_min:
+            return False
+    return True
 
 
 def _short_ok(cur: pd.Series, v: Variant) -> bool:

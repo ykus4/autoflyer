@@ -59,12 +59,15 @@ uv run mypy autoflyer/
 
 ## Recommended Strategy
 
-`MA200_STOP1.5ATR_GARCH40` — best from 8-year grid search (2017–2026)
+`BREAKOUT_STOP1.5_GARCH40` — best from 4.3-year backtest (2022–2026)
 
-- MA200 filter: long entries only when price > MA200 (avoids 2018/2022 crashes)
-- 1.5× ATR stop-loss
+- Donchian 20-bar breakout entry: buy when price breaks above 20-day high
+- MA200 filter: long entries only when price > MA200 (avoids bear markets)
+- 1.5× ATR stop-loss (updated each bar)
 - GARCH 40% position sizing: reduces size during high volatility
-- Results: CAGR 29.1%, Max DD 24.3%, Calmar 1.20
+- Results: +306% (1M→4M JPY), PF 6.03, Max DD 18.5%, 14 trades
+
+Previous: `MA200_STOP1.5ATR_GARCH40` (MA cross entry, +110%, PF 4.80)
 
 ## Configuration
 

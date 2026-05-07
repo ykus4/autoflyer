@@ -1,6 +1,6 @@
 # autoflyer
 
-> BitFlyer FX_BTC_JPY 自動売買ボット — MA クロス戦略
+> BitFlyer FX_BTC_JPY 自動売買ボット — ドンチャンブレイクアウト + GARCH戦略
 
 [![CI](https://github.com/ykus4/autoflyer/actions/workflows/ci.yml/badge.svg)](https://github.com/ykus4/autoflyer/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
@@ -15,20 +15,23 @@
 
 ## 推奨戦略
 
-8年間グリッドサーチ（2017–2026）で最良のパフォーマンスを記録した戦略：
+4.3年間バックテスト（2022–2026）で全バリアント・全時間足中 最高リターン:
 
 ```
-MA200_STOP1.5ATR_GARCH40
+BREAKOUT_STOP1.5_GARCH40 (1D)
 ```
 
 | 指標 | 値 |
 |---|---|
-| CAGR | **29.1%** |
-| 最大DD | 24.3% |
-| Calmar | **1.20** |
+| リターン | **+306%** (100万→406万) |
+| PF | **6.03** |
+| 最大DD | 18.5% |
+| トレード数 | 14 |
+| 勝率 | 50% |
 
-- **MA200フィルター** — MA200より上の時のみロング（2018/2022クラッシュを完全回避）
-- **1.5× ATRストップ** — 機械的なロスカット
+- **ドンチャン20日ブレイクアウト** — 20日高値更新でロングエントリー（トレンド初動を捕捉）
+- **MA200フィルター** — MA200より上の時のみエントリー（ベア相場を完全回避）
+- **1.5× ATRストップ** — 毎日最新ATRで更新される動的ストップロス
 - **GARCH 40% sizing** — ボラティリティが高い時は自動的にポジションサイズを縮小
 
 ---
@@ -73,9 +76,9 @@ cp .env.example .env && nano .env
 BITFLYER_API_KEY=your_key
 BITFLYER_API_SECRET=your_secret
 DRY_RUN=1                          # まずはドライランで確認
-VARIANT=MA200_STOP1.5ATR_GARCH40   # 使用するバリアント
+VARIANT=BREAKOUT_STOP1.5_GARCH40   # 推奨バリアント
 TIMEFRAME=1D                       # 時間足
-TRADE_AMOUNT_JPY=50000             # 1取引あたりの上限（JPY）
+TRADE_AMOUNT_JPY=100000            # 1取引あたりの上限（JPY）
 DASHBOARD_USER=admin               # ダッシュボード認証（設定すると外部公開）
 DASHBOARD_PASS=changeme
 ```
@@ -88,7 +91,7 @@ DASHBOARD_PASS=changeme
 
 ```bash
 uv sync
-python -m autoflyer fetch-binance --end 2026-04-30 --output var/btc_usdt_1d.csv
+python -m autoflyer fetch-binance --end 2026-05-07 --output var/btc_usdt_1d.csv
 ```
 
 **4. 起動**
@@ -99,8 +102,8 @@ tail -f var/run.log
 ```
 
 ```
-2026-04-30 09:00:01 [INFO] Bot start — variant=MA200_STOP1.5ATR_GARCH40  dry_run=True
-2026-04-30 09:00:02 [INFO] cross_up=False  cross_down=False  in_pos=False  dd=0.0%
+2026-05-07 09:00:01 [INFO] Bot start — variant=BREAKOUT_STOP1.5_GARCH40  dry_run=True
+2026-05-07 09:00:02 [INFO] signal_up=False  signal_down=False  in_pos=False  dd=0.0%
 ```
 
 **5. ライブ移行**
@@ -141,7 +144,7 @@ ssh -L 8080:localhost:8080 <user>@<server-ip>
 <summary><b>fetch-binance</b> — Binanceから日足データ取得</summary>
 
 ```bash
-python -m autoflyer fetch-binance --end 2026-05-01 --output var/btc_usdt_1d.csv
+python -m autoflyer fetch-binance --end 2026-05-07 --output var/btc_usdt_1d.csv
 ```
 
 | オプション | デフォルト | 説明 |
@@ -174,7 +177,7 @@ CSVの最終日から今日まで差分のみ取得して追記する。`run.sh`
 
 ```bash
 # 推奨バリアントを1D足で検証
-python -m autoflyer backtest --csv var/btc_usdt_1d.csv --timeframe 1D --variant MA200_STOP1.5ATR_GARCH40
+python -m autoflyer backtest --csv var/btc_usdt_1d.csv --timeframe 1D --variant BREAKOUT_STOP1.5_GARCH40
 
 # 複数時間足 × 全バリアントをグリッドサーチ
 python -m autoflyer backtest --csv var/btc_usdt_1d.csv
@@ -188,7 +191,7 @@ python -m autoflyer backtest --csv var/btc_usdt_1d.csv --timeframe 1D --out-trad
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `--csv` | `data/btc_usdt_1d.csv` | 入力データ |
+| `--csv` | `data/btc_jpy_1m.csv` | 入力データ |
 | `--timeframe` | 全時間足 | 検証する時間足（複数指定可: `1D 12H`） |
 | `--variant` | 全バリアント | 検証するバリアント名（複数指定可） |
 | `--train-end` | なし | ウォークフォワード分割日（これ以降がテスト期間） |
@@ -203,17 +206,17 @@ python -m autoflyer backtest --csv var/btc_usdt_1d.csv --timeframe 1D --out-trad
 # ドライラン（注文なし・動作確認）
 python -m autoflyer bot \
   --timeframe 1D \
-  --variant MA200_STOP1.5ATR_GARCH40 \
-  --amount 300000 \
+  --variant BREAKOUT_STOP1.5_GARCH40 \
+  --amount 100000 \
   --state var/state.json \
   --log-file var/bot.log
 
 # 本番（--live を付けると実注文）
 python -m autoflyer bot --live \
   --timeframe 1D \
-  --variant MA200_STOP1.5ATR_GARCH40 \
-  --amount 300000 \
-  --max-dd-pct 30 \
+  --variant BREAKOUT_STOP1.5_GARCH40 \
+  --amount 100000 \
+  --max-dd-pct 25 \
   --state var/state.json \
   --log-file var/bot.log
 ```
@@ -258,42 +261,49 @@ python -m autoflyer dashboard \
 python -m autoflyer variants
 ```
 
-| バリアント | MA200 | ADX | ストップ | リスク% | GARCH | 説明 |
-|---|:---:|:---:|:---:|:---:|:---:|---|
-| `BASE` | | | | | | MAクロスのみ（ベースライン） |
-| `MA200_FILTER` | ✓ | | | | | MA200フィルターのみ |
-| `ADX20` | | 20 | | | | ADX>20でのみエントリー |
-| `STOP_3ATR` | | | 3ATR | | | 3ATRストップロス |
-| `STOP_4ATR` | | | 4ATR | | | 4ATRストップロス |
-| `STOP_5ATR` | | | 5ATR | | | 5ATRストップロス |
-| `MA200_STOP3` | ✓ | | 3ATR | | | |
-| `MA200_STOP2` | ✓ | | 2ATR | | | |
-| `ADX20_STOP3` | | 20 | 3ATR | | | |
-| `MA200_ADX20_STOP3` | ✓ | 20 | 3ATR | | | |
-| `RISK1PCT_STOP3` | | | 3ATR | 1% | | リスク1%サイジング |
-| `RISK2PCT_STOP3` | | | 3ATR | 2% | | リスク2%サイジング |
-| `MA200_RISK1PCT_STOP3` | ✓ | | 3ATR | 1% | | |
-| `MA200_RISK2PCT_STOP3` | ✓ | | 3ATR | 2% | | |
-| `MA200_STOP2_RISK1PCT` | ✓ | | 2ATR | 1% | | |
-| `MA200_STOP2_RISK2PCT` | ✓ | | 2ATR | 2% | | |
-| `CHAN_3ATR` | | | チャンデリア3ATR | | | トレーリングストップ |
-| `CHAN_2ATR` | | | チャンデリア2ATR | | | トレーリングストップ |
-| `MA200_CHAN3` | ✓ | | チャンデリア3ATR | | | |
-| `MA200_CHAN2` | ✓ | | チャンデリア2ATR | | | |
-| `DON_BREAK` | | | | | | ドンチャンブレークアウト確認 |
-| `DON_BREAK_STOP3` | | | 3ATR | | | |
-| `MA200_DON_STOP3` | ✓ | | 3ATR | | | |
-| `MA200_GARCH20` | ✓ | | | | 20% | GARCHサイジング |
-| `MA200_GARCH30` | ✓ | | | | 30% | GARCHサイジング |
-| `MA200_STOP2_GARCH20` | ✓ | | 2ATR | | 20% | |
-| `MA200_STOP2_GARCH30` | ✓ | | 2ATR | | 30% | |
-| `MA200_STOP1.5ATR_GARCH40` ⭐ | ✓ | | 1.5ATR | | 40% | **推奨** CAGR 29.1% / Calmar 1.20 |
-| `SHORT_STOP3` | | | 3ATR | | | ショート両面 |
-| `MA200_SHORT_STOP3` | ✓ | | 3ATR | | | ショート両面 + MA200 |
-| `ATR_AVOID` | | | | | | 高ボラ回避 |
-| `MA200_ATRAVOID` | ✓ | | | | | 高ボラ回避 + MA200 |
+主要バリアント:
+
+| バリアント | エントリー | フィルター | ストップ | サイジング |
+|---|---|---|---|---|
+| `BREAKOUT_STOP1.5_GARCH40` | ブレイクアウト | MA200 | 1.5ATR | GARCH 40% |
+| `BREAKOUT_STOP2_GARCH40` | ブレイクアウト | MA200 | 2ATR | GARCH 40% |
+| `MA200_STOP1.5ATR_GARCH40` | MAクロス | MA200 | 1.5ATR | GARCH 40% |
+| `BREAKOUT_HURST55_Z1.5_STOP1.5_GARCH40` | ブレイクアウト | MA200+Hurst+z-score | 1.5ATR | GARCH 40% |
+| `BREAKOUT_MAE_MA200_GARCH40` | ブレイクアウト | MA200 | MAE統計 | GARCH 40% |
+| `BREAKOUT_MA200_STOP1.5_KELLY` | ブレイクアウト | MA200 | 1.5ATR | Kelly基準 |
 
 </details>
+
+---
+
+## 戦略一覧
+
+### エントリー方式
+
+| 方式 | 説明 | 代表バリアント |
+|---|---|---|
+| **ドンチャンブレイクアウト** | 20日高値更新でエントリー | `BREAKOUT_*` |
+| MAクロス (20/50) | MA20がMA50を上抜けでエントリー | `BASE`, `MA200_*` |
+| ハイブリッド | MAクロス + ドンチャン確認 | `HYBRID_*` |
+
+### フィルター
+
+| フィルター | 説明 |
+|---|---|
+| MA200 | 価格 > MA200 でのみロング |
+| Hurst指数 | H > 閾値（トレンド状態確認） |
+| z-score | ブレイクアウトの統計的有意性 |
+| HMM | 隠れマルコフモデルによるレジーム判定 |
+| ADX | トレンド強度フィルター |
+| ATR回避 | 高ボラ時のエントリー回避 |
+
+### サイジング
+
+| 方式 | 説明 |
+|---|---|
+| GARCH | ボラティリティ予測に基づく動的サイジング |
+| Kelly基準 | 統計的に最適なベットサイズ（DD極小） |
+| Risk% | 残高の N% をリスクとして固定 |
 
 ---
 
@@ -333,6 +343,7 @@ autoflyer/
 │   │   ├── strategy.py      バリアント定義（Variant dataclass・VARIANTS）
 │   │   ├── indicators.py    テクニカル指標（MA, ATR, ADX, RSI, MACD）
 │   │   ├── garch_sizing.py  GARCHボラティリティ ポジションサイジング
+│   │   ├── stats_filters.py 統計フィルター（Hurst, HMM, Kelly, z-score, MAE）
 │   │   └── fees.py          bitFlyer 手数料ティアモデル
 │   ├── analysis/            バックテスト・データ分析
 │   │   ├── backtest.py      バックテストエンジン
@@ -341,12 +352,8 @@ autoflyer/
 │   └── templates/
 │       └── dashboard.html   ダッシュボード UI
 ├── var/                     実行時データ（gitignored）
-│   ├── bot.log
-│   ├── run.log
-│   ├── run.pid
-│   ├── state.json
-│   └── btc_usdt_1d.csv
 ├── tests/
+├── BACKTEST_RESULTS.md      全バリアントのバックテスト結果
 ├── autoflyer-bot.service    systemd ユニットファイル
 ├── run.sh                   起動・停止スクリプト
 ├── .env                     実行時設定（gitignored）
@@ -360,9 +367,10 @@ autoflyer/
 
 | 設定 | 推奨値 | 効果 |
 |---|---|---|
-| `--amount` | 許容損失額 / 0.243 | 最大DDに基づいたポジション上限 |
-| `--max-dd-pct` | `30` | 30%DD到達で自動停止 |
+| `--amount` | 許容損失額 / 0.185 | 最大DDに基づいたポジション上限 |
+| `--max-dd-pct` | `25` | 25%DD到達で自動停止 |
 | `DRY_RUN=1` | 本番移行前 | 実注文なしで動作確認 |
+| GARCH sizing | 自動 | 高ボラ時にポジション自動縮小 |
 
 > **免責事項**: 本ソフトウェアは教育・研究目的で提供されており、いかなる投資成果も保証しません。
 > 本ソフトウェアを使用した取引による損失・損害について、作者および貢献者は一切の責任を負いません。

@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from ..analysis.backtest import compute_live_stop, compute_signal
 from ..notifications import create_notifier
 from .fees import FeeTierModel
+from .garch_sizing import garch_position_fraction
 from .indicators import add_indicators
 from .strategy import VARIANTS, Variant
 
@@ -234,6 +235,7 @@ def run(args: argparse.Namespace) -> None:
 
     # product_codeはスラッシュなし (BTC_JPY / FX_BTC_JPY)
     product_code = symbol.replace("/", "_") if "/" in symbol else symbol
+    cooldown_remaining: int = 0
 
     def fetch_bars(tf: str, limit: int = 300) -> pd.DataFrame:
         return client.fetch_ohlcv(product_code, tf, limit)
@@ -245,6 +247,66 @@ def run(args: argparse.Namespace) -> None:
         order = client.create_order(product_code, side, btc)
         log.info("Order placed: %s", order)
         return order
+
+    def _entry_ok(bars_ind: pd.DataFrame, side: str) -> bool:
+        """バックテストと同じエントリーフィルターを適用する。"""
+        cur = bars_ind.iloc[-2]  # 最新確定バー
+        if side == "long":
+            if variant.use_ma200_filter and int(cur.get("regime_up", 0)) != 1:
+                log.info("Filter blocked: MA200 regime_up=0")
+                return False
+            if variant.rsi_min is not None and (
+                pd.isna(cur.get("rsi")) or float(cur["rsi"]) < variant.rsi_min
+            ):
+                log.info("Filter blocked: RSI=%.1f < min=%.1f", cur.get("rsi", 0), variant.rsi_min)
+                return False
+            if (
+                variant.atr_high_avoid
+                and pd.notna(cur.get("atr_pct"))
+                and pd.notna(cur.get("atrpct_q75"))
+                and float(cur["atr_pct"]) > float(cur["atrpct_q75"])
+            ):
+                log.info("Filter blocked: ATR volatility too high")
+                return False
+            if variant.require_don_break and int(cur.get("don_break_up", 0)) != 1:
+                log.info("Filter blocked: no Donchian breakout")
+                return False
+            if variant.adx_min is not None and (
+                pd.isna(cur.get("adx")) or float(cur["adx"]) < variant.adx_min
+            ):
+                log.info("Filter blocked: ADX=%.1f < min=%.1f", cur.get("adx", 0), variant.adx_min)
+                return False
+        else:  # short
+            if int(cur.get("regime_up", 1)) != 0:
+                log.info("Filter blocked: regime_up=1, short not allowed")
+                return False
+            if variant.adx_min is not None and (
+                pd.isna(cur.get("adx")) or float(cur["adx"]) < variant.adx_min
+            ):
+                log.info("Filter blocked: ADX=%.1f < min=%.1f", cur.get("adx", 0), variant.adx_min)
+                return False
+        return True
+
+    def _compute_size(jpy: float, price: float, stop_px: float | None, fee_rate: float) -> float:
+        """バックテストと同じサイジングロジック: GARCH + リスクベース。"""
+        # GARCH fraction
+        if variant.garch_target_vol > 0:
+            close_series = bars_ind["close"].iloc[:-1]  # 確定バーのみ
+            garch_frac = garch_position_fraction(close_series, target_vol=variant.garch_target_vol)
+            log.info("GARCH fraction: %.3f (target_vol=%.2f)", garch_frac, variant.garch_target_vol)
+        else:
+            garch_frac = 1.0
+
+        max_btc = jpy * garch_frac / (price * (1.0 + fee_rate))
+
+        # リスクベースサイジング
+        if variant.risk_pct > 0 and stop_px is not None and price > 0:
+            stop_width = abs(price - stop_px)
+            if stop_width > 0:
+                btc = (jpy * garch_frac * variant.risk_pct / 100.0) / stop_width
+                return round(min(btc, max_btc), 8)
+
+        return round(max_btc, 8)
 
     def mtf_trend_ok() -> bool:
         if not args.use_mtf:
@@ -274,6 +336,25 @@ def run(args: argparse.Namespace) -> None:
             bars_ind = add_indicators(bars)
             cross_up, cross_down = compute_signal(bars)
             fee_model.step(pd.Timestamp(bars["dt"].iloc[-2]))
+
+            # ブレイクアウトエントリーモード: ドンチャンチャネルの突破を検出
+            if variant.breakout_entry:
+                confirmed = bars_ind.iloc[-2]  # 最新確定バー
+                breakout_up = bool(
+                    pd.notna(confirmed.get("don_high"))
+                    and float(confirmed["high"]) > float(confirmed["don_high"])
+                )
+                breakout_down = bool(
+                    pd.notna(confirmed.get("don_low"))
+                    and float(confirmed["low"]) < float(confirmed["don_low"])
+                )
+            else:
+                breakout_up = False
+                breakout_down = False
+
+            # エントリーシグナル選択
+            signal_up = breakout_up if variant.breakout_entry else cross_up
+            signal_down = breakout_down if variant.breakout_entry else cross_down
 
             if not dry_run:
                 ticker = client.fetch_ticker(product_code)
@@ -344,6 +425,14 @@ def run(args: argparse.Namespace) -> None:
                     _save_state(state_file, state)
                 break
 
+            # ストップ価格を毎サイクル最新ATRで更新
+            if state["in_pos"] and variant.atr_stop_mult > 0:
+                new_stop = compute_live_stop(bars_ind, entry_price_val, "long", variant)
+                if new_stop is not None and new_stop != state.get("stop_px"):
+                    log.info("Stop updated: %.0f → %.0f", state.get("stop_px") or 0, new_stop)
+                    state["stop_px"] = new_stop
+                    _save_state(state_file, state)
+
             if (
                 state["in_pos"]
                 and state.get("stop_px") is not None
@@ -363,20 +452,29 @@ def run(args: argparse.Namespace) -> None:
                         in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
                     )
                     _save_state(state_file, state)
+                    cooldown_remaining = variant.cooldown_bars
                 time.sleep(interval)
                 continue
 
+            # クールダウン減算
+            if cooldown_remaining > 0:
+                log.info("Cooldown: %d bars remaining", cooldown_remaining)
+                cooldown_remaining -= 1
+
             log.info(
-                "cross_up=%s  cross_down=%s  in_pos=%s  dd=%.1f%%",
-                cross_up,
-                cross_down,
+                "signal_up=%s  signal_down=%s  in_pos=%s  dd=%.1f%%  cooldown=%d",
+                signal_up,
+                signal_down,
                 state["in_pos"],
                 dd_pct,
+                cooldown_remaining,
             )
 
-            if cross_up and not state["in_pos"]:
+            if signal_up and not state["in_pos"] and cooldown_remaining <= 0:
                 if not mtf_trend_ok():
                     log.info("MTF filter blocked long entry")
+                elif not _entry_ok(bars_ind, "long"):
+                    pass  # ログは _entry_ok 内で出力済み
                 else:
                     if not dry_run:
                         try:
@@ -392,8 +490,8 @@ def run(args: argparse.Namespace) -> None:
                     if amount_jpy > 0:
                         jpy = min(jpy, amount_jpy)
                     log.info("使用資金: %.0f JPY  fee_rate=%.4f%%", jpy, fee_model.rate * 100)
-                    btc = round(jpy / (cur_price * (1 + fee_model.rate)), 8)
                     stop_px = compute_live_stop(bars_ind, cur_price, "long", variant)
+                    btc = _compute_size(jpy, cur_price, stop_px, fee_model.rate)
                     if btc > 0 and market_order("buy", btc):
                         fee_model.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc * cur_price)
                         state.update(
@@ -412,7 +510,7 @@ def run(args: argparse.Namespace) -> None:
                             f"ストップ: {stop_px}",
                         )
 
-            elif cross_down and state["in_pos"]:
+            elif signal_down and state["in_pos"]:
                 pnl = (cur_price - entry_price_val) * btc_held
                 if market_order("sell", btc_held):
                     fee_model.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc_held * cur_price)

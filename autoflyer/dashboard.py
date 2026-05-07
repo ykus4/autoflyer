@@ -7,6 +7,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -67,7 +68,7 @@ def _read_state() -> dict:
         return {}
     try:
         return json.loads(_STATE_FILE.read_text())
-    except Exception:
+    except (json.JSONDecodeError, OSError):
         return {}
 
 
@@ -77,7 +78,7 @@ def _read_logs(n: int = 80) -> list[str]:
     try:
         lines = _LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
         return lines[-n:]
-    except Exception:
+    except OSError:
         return []
 
 
@@ -118,7 +119,7 @@ def api_ticker(_: str = Depends(_auth)) -> dict:
             pnl_pct = (last / entry - 1) * 100
             result["unrealized_pnl"] = round(pnl)
             result["unrealized_pnl_pct"] = round(pnl_pct, 2)
-    except Exception as e:
+    except (requests.RequestException, KeyError, ValueError) as e:
         result["error"] = f"ticker: {e}"
 
     # 残高
@@ -127,7 +128,7 @@ def api_ticker(_: str = Depends(_auth)) -> dict:
             bal = _ex.fetch_balance()
             result["jpy_balance"] = bal.get("JPY", {}).get("free")
             result["btc_balance"] = bal.get("BTC", {}).get("free")
-        except Exception as e:
+        except (requests.RequestException, KeyError, ValueError) as e:
             result["error"] = (result["error"] or "") + f" balance: {e}"
 
     return result
@@ -144,7 +145,7 @@ def api_equity(n: int = 500, _: str = Depends(_auth)) -> dict:
         labels = [r["dt"][:16].replace("T", " ") for r in rows]
         values = [round(r["equity"]) for r in rows]
         return {"labels": labels, "values": values}
-    except Exception:
+    except (json.JSONDecodeError, OSError, KeyError):
         return {"labels": [], "values": []}
 
 

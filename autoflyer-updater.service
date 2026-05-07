@@ -1,0 +1,9 @@
+[Unit]
+Description=autoflyer daily data updater
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/autoflyer
+ExecStart=/opt/autoflyer/.venv/bin/python -m autoflyer update --output var/btc_usdt_1d.csv
+EnvironmentFile=/opt/autoflyer/.env
+Environment=PYTHONUNBUFFERED=1

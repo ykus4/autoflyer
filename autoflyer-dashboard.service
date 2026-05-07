@@ -1,0 +1,16 @@
+[Unit]
+Description=autoflyer monitoring dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/autoflyer
+ExecStart=/opt/autoflyer/.venv/bin/python -m autoflyer dashboard --state var/state.json --log-file var/bot.log --port 8080
+EnvironmentFile=/opt/autoflyer/.env
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

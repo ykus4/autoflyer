@@ -1,0 +1,16 @@
+[Unit]
+Description=autoflyer trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/autoflyer
+ExecStart=/opt/autoflyer/.venv/bin/python -m autoflyer bot --live --timeframe ${TIMEFRAME} --variant ${VARIANT} --amount ${TRADE_AMOUNT_JPY} --interval ${POLL_INTERVAL_SEC} --state var/state.json --log-file var/bot.log --max-dd-pct 30
+EnvironmentFile=/opt/autoflyer/.env
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

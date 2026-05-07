@@ -9,9 +9,10 @@ autoflyer/
 ├── autoflyer/
 │   ├── __main__.py          CLI entry point
 │   ├── config.py            Algorithm constants (MA periods, ATR length, etc.)
+│   ├── notifications.py     Email alerts (SMTP)
 │   ├── dashboard.py         Monitoring dashboard API (FastAPI, port 8080)
 │   ├── trading/             Live trading
-│   │   ├── bot.py           Live trading loop, BitFlyerClient
+│   │   ├── bot.py           Live trading loop, BitFlyerClient, retry logic
 │   │   ├── strategy.py      Variant definitions (Variant dataclass, VARIANTS)
 │   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD)
 │   │   ├── garch_sizing.py  GARCH volatility-based position sizing
@@ -24,6 +25,7 @@ autoflyer/
 │       └── dashboard.html   Dashboard UI
 ├── var/                     Runtime data (gitignored)
 ├── tests/
+├── autoflyer-bot.service    systemd unit file
 ├── .env                     Runtime config (gitignored)
 ├── .env.example             Env var template
 ├── run.sh                   Start/stop script
@@ -80,6 +82,12 @@ uv run mypy autoflyer/
 | `POLL_INTERVAL_SEC` | Bot polling interval in seconds |
 | `DASHBOARD_USER` | Basic auth username (enables external access when set) |
 | `DASHBOARD_PASS` | Basic auth password |
+| `SMTP_HOST` | SMTP server hostname (e.g. `smtp.mail.me.com`) |
+| `SMTP_PORT` | SMTP port (default: `587`) |
+| `SMTP_USER` | SMTP login username |
+| `SMTP_PASS` | SMTP password / app password |
+| `SMTP_FROM` | Sender email address (defaults to SMTP_USER) |
+| `NOTIFY_TO` | Notification recipient email address |
 
 **`config.py`** — algorithm constants (same across all environments): MA periods, ATR length, indicator parameters.
 
@@ -92,7 +100,8 @@ uv run mypy autoflyer/
 ## Key Files
 
 - [autoflyer/trading/strategy.py](autoflyer/trading/strategy.py) — add/modify strategy variants
-- [autoflyer/trading/bot.py](autoflyer/trading/bot.py) — live order logic, circuit breaker, state persistence
+- [autoflyer/trading/bot.py](autoflyer/trading/bot.py) — live order logic, circuit breaker, retry, state persistence
+- [autoflyer/notifications.py](autoflyer/notifications.py) — email notification module
 - [autoflyer/analysis/backtest.py](autoflyer/analysis/backtest.py) — vectorized backtest engine
 - [autoflyer/config.py](autoflyer/config.py) — constants (`START_CASH_JPY`, `TIMEFRAMES`, etc.)
 - [autoflyer/templates/dashboard.html](autoflyer/templates/dashboard.html) — dashboard UI

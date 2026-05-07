@@ -187,9 +187,7 @@ class BitFlyerClient:
             }
             body = json.dumps(body_dict)
             headers = self._auth_headers("POST", path, body)
-            resp = self._session.post(
-                f"{_BF_BASE}{path}", headers=headers, data=body, timeout=10
-            )
+            resp = self._session.post(f"{_BF_BASE}{path}", headers=headers, data=body, timeout=10)
             resp.raise_for_status()
             return resp.json()
 
@@ -386,7 +384,9 @@ def run(args: argparse.Namespace) -> None:
                             jpy = float(bal.get("JPY", {}).get("free", 0))
                         except (requests.RequestException, KeyError, ValueError) as e:
                             jpy = amount_jpy or 100_000
-                            log.warning("残高取得失敗 (%s) — フォールバック %.0f JPY を使用", e, jpy)
+                            log.warning(
+                                "残高取得失敗 (%s) — フォールバック %.0f JPY を使用", e, jpy
+                            )
                     else:
                         jpy = amount_jpy or 100_000
                     if amount_jpy > 0:
@@ -444,8 +444,7 @@ def run(args: argparse.Namespace) -> None:
             log.exception("Unexpected error: %s", e)
             notifier.send(
                 "予期しないエラー",
-                f"Botで予期しないエラーが発生しました。確認してください。\n"
-                f"{type(e).__name__}: {e}",
+                f"Botで予期しないエラーが発生しました。確認してください。\n{type(e).__name__}: {e}",
             )
 
         log.info("Sleeping %ds...", interval)

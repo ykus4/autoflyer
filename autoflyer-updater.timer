@@ -1,0 +1,9 @@
+[Unit]
+Description=Run autoflyer data update daily at 00:05 UTC
+
+[Timer]
+OnCalendar=*-*-* 00:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

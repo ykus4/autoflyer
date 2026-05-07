@@ -1,0 +1,16 @@
+[Unit]
+Description=autoflyer BTC trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/autoflyer
+ExecStart=/opt/autoflyer/.venv/bin/python -m autoflyer bot --live
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

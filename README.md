@@ -297,6 +297,28 @@ python -m autoflyer variants
 
 ---
 
+## メール通知
+
+エラーや重要イベント発生時にメールで通知します。`.env` に SMTP 設定を追加するだけで有効化：
+
+```env
+SMTP_HOST=smtp.mail.me.com
+SMTP_PORT=587
+SMTP_USER=your_email@icloud.com
+SMTP_PASS=<App用パスワード>
+NOTIFY_TO=your_email@icloud.com
+```
+
+**通知されるイベント:**
+- サーキットブレーカー発動（ドローダウン閾値超過）
+- エントリー / エグジット / ストップロス到達
+- HTTP / ネットワークエラー（リトライ後も失敗）
+- 予期しないエラー
+
+未設定の場合は通知なしで動作します（ログのみ）。
+
+---
+
 ## ファイル構成
 
 ```
@@ -304,6 +326,7 @@ autoflyer/
 ├── autoflyer/
 │   ├── __main__.py          CLI エントリポイント
 │   ├── config.py            アルゴリズム定数（MA期間・ATR長など全環境共通）
+│   ├── notifications.py     メール通知（SMTP）
 │   ├── dashboard.py         監視ダッシュボード API（FastAPI）
 │   ├── trading/             ライブ取引関連
 │   │   ├── bot.py           ライブ取引ループ・BitFlyerClient
@@ -324,6 +347,7 @@ autoflyer/
 │   ├── state.json
 │   └── btc_usdt_1d.csv
 ├── tests/
+├── autoflyer-bot.service    systemd ユニットファイル
 ├── run.sh                   起動・停止スクリプト
 ├── .env                     実行時設定（gitignored）
 ├── .env.example             設定テンプレート

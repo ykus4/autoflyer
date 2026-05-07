@@ -13,10 +13,13 @@ A plain std fallback is used if GARCH fails to converge.
 
 from __future__ import annotations
 
+import logging
 import warnings
 
 import numpy as np
 import pandas as pd
+
+log = logging.getLogger("autoflyer.garch")
 
 _GARCH_LOOKBACK = 252  # ~1 year of daily bars for estimation
 
@@ -48,7 +51,8 @@ def garch_vol_forecast(
         var_pct2 = float(fc.variance.iloc[-1, 0])
         # annualise and convert back to fraction
         return float(np.sqrt(var_pct2 * 252) / 100)
-    except Exception:
+    except Exception as e:
+        log.warning("GARCH fitting failed (%s) — falling back to rolling std", e)
         return float(np.std(log_ret) * np.sqrt(252) / 100) or 1.0
 
 

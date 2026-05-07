@@ -19,6 +19,7 @@ import requests
 from dotenv import load_dotenv
 
 from ..analysis.backtest import compute_live_stop, compute_signal
+from ..notifications import create_notifier
 from .fees import FeeTierModel
 from .indicators import add_indicators
 from .strategy import VARIANTS, Variant
@@ -40,6 +41,29 @@ _STATE_DEFAULT: dict = {
 }
 
 _BF_BASE = "https://api.bitflyer.com"
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0  # seconds; doubles each attempt
+
+
+def _retry_request(func, *args, **kwargs):
+    """Retry a request function with exponential backoff."""
+    last_exc = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return func(*args, **kwargs)
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES - 1:
+                wait = _RETRY_BACKOFF * (2**attempt)
+                logging.getLogger("autoflyer.bot").warning(
+                    "Request failed (attempt %d/%d): %s — retrying in %.1fs",
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    e,
+                    wait,
+                )
+                time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
 
 
 class BitFlyerClient:
@@ -49,38 +73,55 @@ class BitFlyerClient:
         self._key = api_key
         self._secret = api_secret
         self._session = requests.Session()
+        self._ohlcv_cache: dict[str, tuple[float, pd.DataFrame]] = {}  # tf -> (ts, df)
+        self._ohlcv_cache_ttl = 300.0  # 5 minutes
 
     # ---- Public endpoints ----
 
     def fetch_ticker(self, product_code: str) -> dict:
-        resp = self._session.get(
-            f"{_BF_BASE}/v1/ticker",
-            params={"product_code": product_code},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        def _do():
+            resp = self._session.get(
+                f"{_BF_BASE}/v1/ticker",
+                params={"product_code": product_code},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return _retry_request(_do)
 
     def fetch_executions(
         self, product_code: str, count: int = 500, before: int | None = None
     ) -> list[dict]:
-        params: dict = {"product_code": product_code, "count": count}
-        if before is not None:
-            params["before"] = before
-        resp = self._session.get(f"{_BF_BASE}/v1/getexecutions", params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
+        def _do():
+            params: dict = {"product_code": product_code, "count": count}
+            if before is not None:
+                params["before"] = before
+            resp = self._session.get(f"{_BF_BASE}/v1/getexecutions", params=params, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+
+        return _retry_request(_do)
 
     def fetch_ohlcv(self, product_code: str, tf: str, limit: int = 300) -> pd.DataFrame:
-        """CoinGecko APIで日足/時間足OHLCVを取得する。"""
+        """CoinGecko APIで日足/時間足OHLCVを取得する（キャッシュ付き）。"""
+        cache_key = f"{product_code}:{tf}:{limit}"
+        cached = self._ohlcv_cache.get(cache_key)
+        if cached and (time.time() - cached[0]) < self._ohlcv_cache_ttl:
+            return cached[1].copy()
+
         days = _tf_to_coingecko_days(tf, limit)
-        resp = self._session.get(
-            "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
-            params={"vs_currency": "jpy", "days": days},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+
+        def _do():
+            resp = self._session.get(
+                "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
+                params={"vs_currency": "jpy", "days": days},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        data = _retry_request(_do)
         df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close"])
         df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
         df["volume"] = 0.0
@@ -103,7 +144,9 @@ class BitFlyerClient:
                 .reset_index()
             )
 
-        return df.tail(limit).reset_index(drop=True)
+        result = df.tail(limit).reset_index(drop=True)
+        self._ohlcv_cache[cache_key] = (time.time(), result)
+        return result.copy()
 
     # ---- Private endpoints ----
 
@@ -119,36 +162,53 @@ class BitFlyerClient:
         }
 
     def fetch_balance(self) -> dict:
-        path = "/v1/me/getbalance"
-        headers = self._auth_headers("GET", path)
-        resp = self._session.get(f"{_BF_BASE}{path}", headers=headers, timeout=10)
-        resp.raise_for_status()
+        def _do():
+            path = "/v1/me/getbalance"
+            headers = self._auth_headers("GET", path)
+            resp = self._session.get(f"{_BF_BASE}{path}", headers=headers, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+
         # [{currency_code: "JPY", amount: ..., available: ...}, ...]
         result = {}
-        for item in resp.json():
+        for item in _retry_request(_do):
             code = item["currency_code"]
             result[code] = {"free": item["available"], "total": item["amount"]}
         return result
 
     def create_order(self, product_code: str, side: str, size: float) -> dict:
-        path = "/v1/me/sendchildorder"
-        body_dict = {
-            "product_code": product_code,
-            "child_order_type": "MARKET",
-            "side": side.upper(),
-            "size": size,
-        }
-        body = json.dumps(body_dict)
-        headers = self._auth_headers("POST", path, body)
-        resp = self._session.post(f"{_BF_BASE}{path}", headers=headers, data=body, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+        def _do():
+            path = "/v1/me/sendchildorder"
+            body_dict = {
+                "product_code": product_code,
+                "child_order_type": "MARKET",
+                "side": side.upper(),
+                "size": size,
+            }
+            body = json.dumps(body_dict)
+            headers = self._auth_headers("POST", path, body)
+            resp = self._session.post(
+                f"{_BF_BASE}{path}", headers=headers, data=body, timeout=10
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        return _retry_request(_do)
+
+
+_EQUITY_MAX_BYTES = 5 * 1024 * 1024  # 5MB per file
 
 
 def _append_equity(equity_file: Path, equity: float) -> None:
     row = json.dumps({"dt": datetime.now(timezone.utc).isoformat(), "equity": equity})
     with equity_file.open("a", encoding="utf-8") as f:
         f.write(row + "\n")
+    # Rotate if file exceeds size limit
+    if equity_file.exists() and equity_file.stat().st_size > _EQUITY_MAX_BYTES:
+        rotated = equity_file.with_suffix(".jsonl.1")
+        if rotated.exists():
+            rotated.unlink()
+        equity_file.rename(rotated)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -169,6 +229,7 @@ def run(args: argparse.Namespace) -> None:
     log = _setup_logging(args.log_file, symbol, timeframe, variant, dry_run, max_dd_pct)
 
     client = BitFlyerClient(api_key, api_secret)
+    notifier = create_notifier()
     state = _load_state(state_file, log)
     log.info("Loaded state: %s", state)
     fee_model = FeeTierModel()
@@ -205,7 +266,7 @@ def run(args: argparse.Namespace) -> None:
                 trend_up,
             )
             return trend_up
-        except Exception as e:
+        except (requests.RequestException, ValueError, KeyError) as e:
             log.warning("MTF fetch failed (%s) — allowing entry", e)
             return True
 
@@ -243,13 +304,13 @@ def run(args: argparse.Namespace) -> None:
                         btc_balance,
                         cur_equity,
                     )
-                except Exception:
+                except (requests.RequestException, KeyError, ValueError) as e:
                     cur_equity = (
                         (cur_price - entry_price_val) * btc_held + (amount_jpy or 100_000)
                         if state["in_pos"]
                         else (amount_jpy or 100_000)
                     )
-                    log.warning("残高取得失敗 — 推定値で資産計算: %.0f JPY", cur_equity)
+                    log.warning("残高取得失敗 (%s) — 推定値で資産計算: %.0f JPY", e, cur_equity)
 
             if state["peak_cash"] is None or cur_equity > state["peak_cash"]:
                 state["peak_cash"] = cur_equity
@@ -262,6 +323,12 @@ def run(args: argparse.Namespace) -> None:
                     "CIRCUIT BREAKER: drawdown %.1f%% >= %.1f%% — closing position and stopping.",
                     dd_pct,
                     max_dd_pct,
+                )
+                notifier.send(
+                    "CIRCUIT BREAKER 発動",
+                    f"ドローダウン {dd_pct:.1f}% が閾値 {max_dd_pct:.1f}% に到達。\n"
+                    f"Bot を停止しポジションをクローズします。\n"
+                    f"資産: {cur_equity:,.0f} JPY / ピーク: {state['peak_cash']:,.0f} JPY",
                 )
                 if (
                     state["in_pos"]
@@ -288,6 +355,12 @@ def run(args: argparse.Namespace) -> None:
                     fee_model.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc_held * cur_price)
                     pnl = (cur_price - entry_price_val) * btc_held
                     log.info("STOP HIT  %.8f BTC @ %.0f JPY  pnl≈%.0f", btc_held, cur_price, pnl)
+                    notifier.send(
+                        "STOP HIT — ポジション決済",
+                        f"ストップロスに到達しました。\n"
+                        f"売却: {btc_held:.8f} BTC @ {cur_price:,.0f} JPY\n"
+                        f"損益: {pnl:+,.0f} JPY",
+                    )
                     state.update(
                         in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
                     )
@@ -311,9 +384,9 @@ def run(args: argparse.Namespace) -> None:
                         try:
                             bal = client.fetch_balance()
                             jpy = float(bal.get("JPY", {}).get("free", 0))
-                        except Exception:
+                        except (requests.RequestException, KeyError, ValueError) as e:
                             jpy = amount_jpy or 100_000
-                            log.warning("残高取得失敗 — フォールバック %.0f JPY を使用", jpy)
+                            log.warning("残高取得失敗 (%s) — フォールバック %.0f JPY を使用", e, jpy)
                     else:
                         jpy = amount_jpy or 100_000
                     if amount_jpy > 0:
@@ -332,12 +405,24 @@ def run(args: argparse.Namespace) -> None:
                         )
                         _save_state(state_file, state)
                         log.info("ENTRY  %.8f BTC @ %.0f JPY  stop_px=%s", btc, cur_price, stop_px)
+                        notifier.send(
+                            "ENTRY — ポジション取得",
+                            f"買いエントリーしました。\n"
+                            f"購入: {btc:.8f} BTC @ {cur_price:,.0f} JPY\n"
+                            f"ストップ: {stop_px}",
+                        )
 
             elif cross_down and state["in_pos"]:
                 pnl = (cur_price - entry_price_val) * btc_held
                 if market_order("sell", btc_held):
                     fee_model.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc_held * cur_price)
                     log.info("EXIT  %.8f BTC @ %.0f JPY  pnl≈%.0f", btc_held, cur_price, pnl)
+                    notifier.send(
+                        "EXIT — ポジション決済",
+                        f"シグナルによりポジションを決済しました。\n"
+                        f"売却: {btc_held:.8f} BTC @ {cur_price:,.0f} JPY\n"
+                        f"損益: {pnl:+,.0f} JPY",
+                    )
                     state.update(
                         in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
                     )
@@ -345,10 +430,23 @@ def run(args: argparse.Namespace) -> None:
 
         except requests.HTTPError as e:
             log.error("HTTP error: %s", e)
+            notifier.send("HTTP エラー", f"API呼び出しでHTTPエラーが発生しました。\n{e}")
         except requests.RequestException as e:
             log.error("Network error: %s", e)
-        except Exception:
-            log.exception("Unexpected error")
+            notifier.send("ネットワークエラー", f"API通信に失敗しました。\n{e}")
+        except (ValueError, KeyError, TypeError) as e:
+            log.exception("Data processing error: %s", e)
+            notifier.send(
+                "データ処理エラー",
+                f"データの処理中にエラーが発生しました。\n{type(e).__name__}: {e}",
+            )
+        except Exception as e:
+            log.exception("Unexpected error: %s", e)
+            notifier.send(
+                "予期しないエラー",
+                f"Botで予期しないエラーが発生しました。確認してください。\n"
+                f"{type(e).__name__}: {e}",
+            )
 
         log.info("Sleeping %ds...", interval)
         time.sleep(interval)
@@ -450,6 +548,22 @@ def _load_state(state_file: Path, log: logging.Logger) -> dict:
         data = json.loads(state_file.read_text())
         for k, v in _STATE_DEFAULT.items():
             data.setdefault(k, v)
+        # Validate logical consistency
+        if data["in_pos"] and (not data.get("entry_price") or float(data.get("btc", 0)) <= 0):
+            log.warning(
+                "State inconsistency: in_pos=True but entry_price=%s, btc=%s — resetting",
+                data.get("entry_price"),
+                data.get("btc"),
+            )
+            data.update(in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None)
+            _save_state(state_file, data)
+        if not data["in_pos"] and float(data.get("btc", 0)) > 0:
+            log.warning(
+                "State inconsistency: in_pos=False but btc=%.8f — resetting btc to 0",
+                float(data["btc"]),
+            )
+            data["btc"] = 0.0
+            _save_state(state_file, data)
         return data
     except (json.JSONDecodeError, OSError) as e:
         backup = state_file.with_suffix(".json.bak")

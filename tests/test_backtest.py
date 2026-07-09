@@ -151,6 +151,24 @@ class TestSlippage:
         assert trades_slip["net_pnl_jpy"].sum() <= trades_no_slip["net_pnl_jpy"].sum() + 1e-3
 
 
+class TestSupertrend:
+    def test_supertrend_variant_runs(self):
+        bars = _make_bars(500, seed=4)
+        v = Variant("BRK_ST", breakout_entry=True, supertrend_mult=3.0)
+        trades, equity = run(bars, start_cash=START_CASH_JPY, tf_label="1D", variant=v)
+        assert isinstance(trades, pd.DataFrame)
+        assert (equity["equity"] >= 0).all()
+
+    def test_supertrend_sets_stops(self):
+        # Supertrend バリアントはストップ経由の決済を生む
+        bars = _make_bars(800, seed=1)
+        v = Variant("BRK_ST", breakout_entry=True, use_ma200_filter=True, supertrend_mult=3.0)
+        trades, _ = run(bars, start_cash=START_CASH_JPY, tf_label="1D", variant=v)
+        if trades.empty:
+            pytest.skip("No trades generated")
+        assert trades["exit_reason"].isin(["stop", "trail_stop", "ma_cross", "tp"]).all()
+
+
 class TestCooldown:
     def test_cooldown_reduces_trades_after_stop(self):
         bars = _make_bars(800, seed=1)

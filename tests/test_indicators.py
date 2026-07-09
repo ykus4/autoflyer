@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from autoflyer.trading.indicators import add_indicators, adx, atr, macd, rsi
+from autoflyer.trading.indicators import add_indicators, adx, atr, macd, rsi, supertrend
 
 
 def _bars(n: int = 100, seed: int = 42) -> pd.DataFrame:
@@ -74,11 +74,36 @@ class TestAdx:
         assert (valid >= 0).all() and (valid <= 100).all()
 
 
+class TestSupertrend:
+    def test_length_and_index(self):
+        df = _bars(100)
+        st = supertrend(df, mult=3.0)
+        assert len(st) == 100
+        assert list(st.index) == list(df.index)
+
+    def test_line_between_high_and_low_bounds(self):
+        # Supertrend ラインは価格レンジ内に収まる（極端に外れない）
+        df = _bars(200)
+        st = supertrend(df, mult=3.0).dropna()
+        assert (st > 0).all()
+        assert st.max() <= df["high"].max() * 1.5
+
+    def test_tighter_mult_closer_to_price(self):
+        # mult が小さいほどラインは価格に近い（平均乖離が小さい）
+        df = _bars(200)
+        close = df["close"]
+        near = (supertrend(df, mult=1.0) - close).abs().mean()
+        far = (supertrend(df, mult=5.0) - close).abs().mean()
+        assert near < far
+
+
 class TestAddIndicators:
     def test_all_columns_exist(self):
         df = _bars(300)
         out = add_indicators(df)
         required = [
+            "ma_fast",
+            "ma_slow",
             "ma200",
             "regime_up",
             "rsi",

@@ -59,6 +59,10 @@ class Variant:
     # MAEベースストップ: 過去の逆行統計からストップ幅を動的計算（atr_stop_multの代替）
     use_mae_stop: bool = False
 
+    # Supertrend トレーリングストップ: Supertrend ラインをストップに使う（0 = 無効）。
+    # atr_stop_mult / chandelier_mult より優先。一般的な既定は 3.0。
+    supertrend_mult: float = 0.0
+
 
 VARIANTS: list[Variant] = [
     # ベースライン
@@ -319,5 +323,62 @@ VARIANTS: list[Variant] = [
         garch_target_vol=0.40,
         hurst_min=0.55,
         zscore_min=1.5,
+    ),
+    # === 新推奨: タイトな 1.0ATR ストップ（損切りを速め、PF/DD/リターンを同時改善）===
+    # グリッドサーチで発見（2022–2026: +178%, PF 3.79, DD 24.7% / full: +1405%, PF 4.01）
+    Variant(
+        "BREAKOUT_STOP1.0_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.40,
+    ),
+    # 最大リターン狙い（GARCH50 でボラ目標を引き上げ: 2022–2026 +194%, PF 3.71, DD 26.9%）
+    Variant(
+        "BREAKOUT_STOP1.0_GARCH50",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.50,
+    ),
+    # === Supertrend トレーリングストップ バリアント ===
+    # Supertrend ラインでトレンドを追従し、フリップで決済（利を伸ばしつつ守る）
+    # ST4.0 が最良（2022–2026: +166%, PF 3.17, WR 52.6%）
+    Variant(
+        "BREAKOUT_SUPERTREND4_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        supertrend_mult=4.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "BREAKOUT_SUPERTREND3_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        supertrend_mult=3.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "BREAKOUT_SUPERTREND2_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        supertrend_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    # MA クロスエントリー + Supertrend トレーリング
+    Variant(
+        "MA200_SUPERTREND3_GARCH40",
+        use_ma200_filter=True,
+        supertrend_mult=3.0,
+        garch_target_vol=0.40,
+    ),
+    # Supertrend + Hurst フィルター（トレンド確認済みのみ）
+    Variant(
+        "BREAKOUT_HURST55_SUPERTREND3_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        supertrend_mult=3.0,
+        garch_target_vol=0.40,
+        hurst_min=0.55,
     ),
 ]

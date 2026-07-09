@@ -23,6 +23,9 @@ MACD_SLOW = 26
 MACD_SIGNAL = 9
 DON_TERM = 20
 
+# --- Supertrend（トレンド追従トレーリングストップ）---
+SUPERTREND_ATR_LEN = 10
+
 # --- 表示 ---
 SHOW_LAST_N_MONTHS = 24
 TZ_DISPLAY = "Asia/Tokyo"

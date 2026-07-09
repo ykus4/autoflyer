@@ -7,28 +7,35 @@ BitFlyer FX_BTC_JPY automated trading bot using a MA-cross strategy. Single CLI 
 ```
 autoflyer/
 ├── autoflyer/
-│   ├── __main__.py          CLI entry point
+│   ├── __main__.py          CLI entry point (thin parse + dispatch)
 │   ├── config.py            Algorithm constants (MA periods, ATR length, etc.)
 │   ├── notifications.py     Email alerts (SMTP)
 │   ├── dashboard.py         Monitoring dashboard API (FastAPI, port 8080)
 │   ├── trading/             Live trading
 │   │   ├── bot.py           Live trading loop, BitFlyerClient, retry logic
 │   │   ├── strategy.py      Variant definitions (Variant dataclass, VARIANTS)
-│   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD)
+│   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD, Supertrend)
 │   │   ├── garch_sizing.py  GARCH volatility-based position sizing
+│   │   ├── stats_filters.py Statistical filters (Hurst, HMM, Kelly, z-score, MAE)
 │   │   └── fees.py          bitFlyer fee tier model
 │   ├── analysis/            Backtesting and data
 │   │   ├── backtest.py      Vectorized backtest engine
+│   │   ├── fetch.py         OHLCV fetching (GMO/Binance, incremental update)
 │   │   ├── data.py          CSV loading and OHLCV resampling
 │   │   └── report.py        Aggregation and display
 │   └── templates/
 │       └── dashboard.html   Dashboard UI
+├── deploy/                  Deployment
+│   ├── run.sh               Start/stop script
+│   ├── install-systemd.sh   systemd setup
+│   └── autoflyer-*.service  systemd units/timer
+├── docs/                    Documentation (mkdocs)
+│   ├── index.md             Usage guide
+│   └── backtest-results.md  Backtest results for all variants
 ├── var/                     Runtime data (gitignored)
 ├── tests/
-├── autoflyer-bot.service    systemd unit file
 ├── .env                     Runtime config (gitignored)
 ├── .env.example             Env var template
-├── run.sh                   Start/stop script
 └── pyproject.toml
 ```
 
@@ -59,7 +66,7 @@ uv run mypy autoflyer/
 
 ## Recommended Strategy
 
-`BREAKOUT_STOP1.0_GARCH40` — best from grid search (see BACKTEST_RESULTS.md, 2026-07-09)
+`BREAKOUT_STOP1.0_GARCH40` — best from grid search (see docs/backtest-results.md, 2026-07-09)
 
 - Donchian 20-bar breakout entry: buy when price breaks above 20-day high
 - MA200 filter: long entries only when price > MA200 (avoids bear markets)

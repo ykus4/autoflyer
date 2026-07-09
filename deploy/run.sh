@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 
-cd "$(dirname "$0")"
+# このスクリプトは deploy/ 配下にあるため、リポジトリのルートへ移動する
+cd "$(dirname "$0")/.."
 
 [ -f .env ] && set -a && source .env && set +a
 

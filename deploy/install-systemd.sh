@@ -9,6 +9,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# リポジトリのルート（このスクリプトは deploy/ 配下にある想定）
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "→ 既存の run.sh プロセスを停止..."
 "$SCRIPT_DIR/run.sh" stop 2>/dev/null || true
@@ -19,10 +21,10 @@ cp "$SCRIPT_DIR/autoflyer-dashboard.service" /etc/systemd/system/
 cp "$SCRIPT_DIR/autoflyer-updater.service" /etc/systemd/system/
 cp "$SCRIPT_DIR/autoflyer-updater.timer" /etc/systemd/system/
 
-# WorkingDirectory をこのリポジトリのパスに書き換え
-sed -i "s|WorkingDirectory=.*|WorkingDirectory=$SCRIPT_DIR|g" /etc/systemd/system/autoflyer-*.service
-sed -i "s|ExecStart=.*/.venv/bin/python|ExecStart=$SCRIPT_DIR/.venv/bin/python|g" /etc/systemd/system/autoflyer-*.service
-sed -i "s|EnvironmentFile=.*/.env|EnvironmentFile=$SCRIPT_DIR/.env|g" /etc/systemd/system/autoflyer-*.service
+# WorkingDirectory 等をこのリポジトリのルートに書き換え
+sed -i "s|WorkingDirectory=.*|WorkingDirectory=$REPO_DIR|g" /etc/systemd/system/autoflyer-*.service
+sed -i "s|ExecStart=.*/.venv/bin/python|ExecStart=$REPO_DIR/.venv/bin/python|g" /etc/systemd/system/autoflyer-*.service
+sed -i "s|EnvironmentFile=.*/.env|EnvironmentFile=$REPO_DIR/.env|g" /etc/systemd/system/autoflyer-*.service
 
 echo "→ systemd リロード..."
 systemctl daemon-reload

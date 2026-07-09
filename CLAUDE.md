@@ -59,15 +59,20 @@ uv run mypy autoflyer/
 
 ## Recommended Strategy
 
-`BREAKOUT_STOP1.5_GARCH40` — best from 4.3-year backtest (2022–2026)
+`BREAKOUT_STOP1.0_GARCH40` — best from grid search (see BACKTEST_RESULTS.md, 2026-07-09)
 
 - Donchian 20-bar breakout entry: buy when price breaks above 20-day high
 - MA200 filter: long entries only when price > MA200 (avoids bear markets)
-- 1.5× ATR stop-loss (updated each bar)
+- **1.0× ATR stop-loss** (tighter than the old 1.5× — cuts losers faster; improves
+  return, profit factor and drawdown simultaneously across all validation windows)
 - GARCH 40% position sizing: reduces size during high volatility
-- Results: +306% (1M→4M JPY), PF 6.03, Max DD 18.5%, 14 trades
+- Results (2022–2026, BTC/USDT 1D): +178%, PF 3.79, Max DD 24.7%, 17 trades
+- Max-return alternative: `BREAKOUT_STOP1.0_GARCH50` (+194%, PF 3.71, DD 26.9%)
 
-Previous: `MA200_STOP1.5ATR_GARCH40` (MA cross entry, +110%, PF 4.80)
+New algorithm — **Supertrend trailing stop** (`supertrend_mult` on a Variant): follows the
+trend and exits on flip. Best is `BREAKOUT_SUPERTREND4_GARCH40` (+166%, PF 3.17, WR 52.6%).
+
+Previous best: `BREAKOUT_STOP1.5_GARCH40` (+136%, PF 2.62, DD 30.1% on the same engine/data).
 
 ## Configuration
 

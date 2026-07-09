@@ -318,9 +318,9 @@ def _cmd_variants(_args: argparse.Namespace) -> None:
 
     print(
         f"{'Name':<40} {'ma200':^5} {'stop':^5} {'tp':^4} {'trail':^5}"
-        f" {'brk':^3} {'garch':^5} {'risk%':^6}"
+        f" {'brk':^3} {'st':^4} {'garch':^5} {'risk%':^6}"
     )
-    print("-" * 82)
+    print("-" * 87)
     for v in VARIANTS:
         print(
             f"{v.name:<40}"
@@ -329,6 +329,7 @@ def _cmd_variants(_args: argparse.Namespace) -> None:
             f" {str(v.tp_atr_mult) if v.tp_atr_mult else '-':^4}"
             f" {str(v.tp_trail_mult) if v.tp_trail_mult else '-':^5}"
             f" {'✓' if v.breakout_entry else ' ':^3}"
+            f" {str(v.supertrend_mult) if v.supertrend_mult else '-':^4}"
             f" {str(v.garch_target_vol) if v.garch_target_vol else '-':^5}"
             f" {str(v.risk_pct) if v.risk_pct else '-':^6}"
         )

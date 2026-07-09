@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from ..config import (
@@ -9,11 +10,14 @@ from ..config import (
     ATR_LEN,
     ATR_Q_LOOKBACK,
     DON_TERM,
+    MA_FAST,
+    MA_SLOW,
     MACD_FAST,
     MACD_SIGNAL,
     MACD_SLOW,
     REGIME_MA_LEN,
     RSI_LEN,
+    SUPERTREND_ATR_LEN,
 )
 
 
@@ -65,12 +69,62 @@ def adx(df: pd.DataFrame, length: int = ADX_LEN) -> pd.Series:
     return dx.ewm(alpha=alpha, adjust=False).mean()
 
 
+def supertrend(df: pd.DataFrame, mult: float, length: int = SUPERTREND_ATR_LEN) -> pd.Series:
+    """Supertrend トレーリングストップ・ラインを系列全体で計算する。
+
+    上昇トレンド中は価格の下、下降トレンド中は価格の上に位置し、終値が
+    ラインを突破するとフリップする。トレンド追従型のストップに適する。
+    フリップ済みのラインをそのまま `stop_px` に使うと、ロングは下抜け、
+    ショートは上抜けで決済される。
+    """
+    high = df["high"].to_numpy(dtype=float)
+    low = df["low"].to_numpy(dtype=float)
+    close = df["close"].to_numpy(dtype=float)
+    atr_arr = atr(df, length).to_numpy(dtype=float)
+    n = len(close)
+    hl2 = (high + low) / 2.0
+    upper = hl2 + mult * atr_arr
+    lower = hl2 - mult * atr_arr
+
+    st = np.full(n, np.nan)
+    final_upper = np.nan
+    final_lower = np.nan
+    prev_st = np.nan
+    for i in range(n):
+        if np.isnan(atr_arr[i]):
+            continue
+        fu = (
+            upper[i]
+            if (np.isnan(final_upper) or upper[i] < final_upper or close[i - 1] > final_upper)
+            else final_upper
+        )
+        fl = (
+            lower[i]
+            if (np.isnan(final_lower) or lower[i] > final_lower or close[i - 1] < final_lower)
+            else final_lower
+        )
+        if np.isnan(prev_st):
+            cur_st = fu
+        elif prev_st == final_upper:
+            cur_st = fl if close[i] > fu else fu
+        else:  # 直前はロワーバンド（上昇トレンド）
+            cur_st = fu if close[i] < fl else fl
+        st[i] = cur_st
+        final_upper, final_lower, prev_st = fu, fl, cur_st
+
+    return pd.Series(st, index=df.index)
+
+
 def add_indicators(bars: pd.DataFrame) -> pd.DataFrame:
     # 入力がすでにソート済みの場合はコピーのみ、未ソートなら sort して返す
     if bars["dt"].is_monotonic_increasing:
         x = bars.reset_index(drop=True).copy()
     else:
         x = bars.sort_values("dt").reset_index(drop=True)
+
+    # MA クロス用の移動平均（バックテストで共有し重複計算を避ける）
+    x["ma_fast"] = x["close"].rolling(MA_FAST).mean()
+    x["ma_slow"] = x["close"].rolling(MA_SLOW).mean()
 
     x["ma200"] = x["close"].rolling(REGIME_MA_LEN).mean()
     x["regime_up"] = (x["close"] > x["ma200"]).astype("int64")

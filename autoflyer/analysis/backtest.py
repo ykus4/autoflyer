@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from ..config import (
@@ -17,7 +18,7 @@ from ..config import (
     REGIME_MA_LEN,
 )
 from ..trading.fees import FeeTierModel
-from ..trading.indicators import add_indicators
+from ..trading.indicators import add_indicators, supertrend
 from ..trading.stats_filters import (
     breakout_zscore,
     hmm_regime,
@@ -28,22 +29,6 @@ from ..trading.stats_filters import (
 from ..trading.strategy import Variant
 
 _WARMUP = max(MA_SLOW, REGIME_MA_LEN, MACD_SLOW, ADX_LEN, ATR_LEN, DON_TERM, ATR_Q_LOOKBACK) + 3
-
-_DIAG_COLS = [
-    "dt",
-    "ma200",
-    "regime_up",
-    "rsi",
-    "atr",
-    "atr_pct",
-    "atrpct_q75",
-    "adx",
-    "macd_hist",
-    "macd_up",
-    "don_break_up",
-    "don_high",
-    "don_low",
-]
 
 
 @dataclass
@@ -125,14 +110,17 @@ def run(
     bars_with_ind: 事前計算済みの add_indicators() 結果。複数バリアントで共有することで
                    同じ時間足内での重複計算を避けられる。None の場合は内部で計算する。
     """
-    if bars["dt"].is_monotonic_increasing:
-        x = bars.reset_index(drop=True).copy()
-    else:
-        x = bars.sort_values("dt").reset_index(drop=True)
-    x["ma_fast"] = x["close"].rolling(MA_FAST).mean()
-    x["ma_slow"] = x["close"].rolling(MA_SLOW).mean()
+    # add_indicators() は ma_fast/ma_slow を含む全指標を持つため、複数バリアントで
+    # 共有すれば時間足ごとの重複計算（ローリング + merge_asof）を丸ごと省ける。
     ind = bars_with_ind if bars_with_ind is not None else add_indicators(bars)
-    x = pd.merge_asof(x, ind[_DIAG_COLS], on="dt", direction="backward")
+    if not ind["dt"].is_monotonic_increasing:
+        ind = ind.sort_values("dt")
+    x = ind.reset_index(drop=True)
+
+    # Supertrend トレーリングストップ用のラインを系列全体で 1 度だけ計算
+    st_line = (
+        supertrend(x, variant.supertrend_mult).to_numpy() if variant.supertrend_mult > 0 else None
+    )
 
     # ウォークフォワード: train_end より前は取引しない
     trade_start_idx = int((x["dt"] > train_end).argmax()) if train_end is not None else 0
@@ -181,6 +169,12 @@ def run(
             else:
                 pos.trail_best = min(pos.trail_best or float(cur["low"]), float(cur["low"]))
                 pos.stop_px = pos.trail_best + v.chandelier_mult * cur_atr
+
+        # Supertrend トレーリングストップ更新（フリップ済みラインをそのまま採用）
+        if pos is not None and st_line is not None and not pos.tp_hit:
+            st_val = st_line[i]
+            if not np.isnan(st_val):
+                pos.stop_px = float(st_val)
 
         # 固定 ATR ストップも毎バー最新 ATR で更新（エントリー価格は固定）
         if (
@@ -283,8 +277,10 @@ def run(
                 raw_px = float(nxt["open"])
                 px = _apply_slippage(raw_px, "long", "entry", slippage_pct)
 
-                # MAEベースストップ or 固定ATRストップ
-                if v.use_mae_stop and cur_atr > 0:
+                # Supertrend or MAEベース or 固定ATRストップ（Supertrend が最優先）
+                if st_line is not None and not np.isnan(st_line[i]):
+                    stop_px = float(st_line[i])
+                elif v.use_mae_stop and cur_atr > 0:
                     atr_hist = x["atr"].iloc[: i + 1] if "atr" in x.columns else None
                     if atr_hist is not None:
                         mae_mult = mae_optimal_stop(close_hist, atr_hist)
@@ -323,11 +319,12 @@ def run(
             elif entry_short and v.enable_short and _short_ok(cur, v):
                 raw_px = float(nxt["open"])
                 px = _apply_slippage(raw_px, "short", "entry", slippage_pct)
-                stop_px = (
-                    (px + v.atr_stop_mult * cur_atr)
-                    if v.atr_stop_mult > 0 and cur_atr > 0
-                    else None
-                )
+                if st_line is not None and not np.isnan(st_line[i]):
+                    stop_px = float(st_line[i])
+                elif v.atr_stop_mult > 0 and cur_atr > 0:
+                    stop_px = px + v.atr_stop_mult * cur_atr
+                else:
+                    stop_px = None
                 tp_px = (
                     (px - v.tp_atr_mult * cur_atr) if v.tp_atr_mult > 0 and cur_atr > 0 else None
                 )

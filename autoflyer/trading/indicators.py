@@ -25,6 +25,12 @@ def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
+def log_returns(series: pd.Series) -> np.ndarray:
+    """連続する終値の対数リターン。先頭の欠損を落とすので長さは入力より 1 短い。"""
+    ratios = (series / series.shift(1)).to_numpy(dtype=float)
+    return np.log(ratios[1:])
+
+
 def _true_range(df: pd.DataFrame) -> pd.Series:
     prev_close = df["close"].shift(1)
     return pd.concat(
@@ -44,8 +50,11 @@ def rsi(series: pd.Series, length: int = RSI_LEN) -> pd.Series:
     return 100 - (100 / (1 + gain / loss.replace(0, float("nan"))))
 
 
-def atr(df: pd.DataFrame, length: int = ATR_LEN) -> pd.Series:
-    return _true_range(df).ewm(alpha=1 / length, adjust=False).mean()
+def atr(df: pd.DataFrame, length: int = ATR_LEN, tr: pd.Series | None = None) -> pd.Series:
+    """`tr` を渡すと true range の再計算を省ける。"""
+    if tr is None:
+        tr = _true_range(df)
+    return tr.ewm(alpha=1 / length, adjust=False).mean()
 
 
 def macd(series: pd.Series) -> pd.DataFrame:
@@ -54,13 +63,14 @@ def macd(series: pd.Series) -> pd.DataFrame:
     return pd.DataFrame({"macd": line, "macd_signal": signal, "macd_hist": line - signal})
 
 
-def adx(df: pd.DataFrame, length: int = ADX_LEN) -> pd.Series:
+def adx(df: pd.DataFrame, length: int = ADX_LEN, tr: pd.Series | None = None) -> pd.Series:
+    """`tr` を渡すと true range の再計算を省ける。"""
     up, down = df["high"].diff(), -df["low"].diff()
     plus_dm = up.where((up > down) & (up > 0), 0.0)
     minus_dm = down.where((down > up) & (down > 0), 0.0)
 
-    # _true_range を一度だけ計算して ATR と DI 両方に再利用
-    tr = _true_range(df)
+    if tr is None:
+        tr = _true_range(df)
     alpha = 1 / length
     atr_ = tr.ewm(alpha=alpha, adjust=False).mean().replace(0, float("nan"))
     plus_di = 100 * plus_dm.ewm(alpha=alpha, adjust=False).mean() / atr_
@@ -130,14 +140,12 @@ def add_indicators(bars: pd.DataFrame) -> pd.DataFrame:
     x["regime_up"] = (x["close"] > x["ma200"]).astype("int64")
     x["rsi"] = rsi(x["close"])
 
-    # ATR と ADX で true_range を共有して計算を節約
+    # ATR と ADX で true_range を一度だけ計算して共有する
     tr = _true_range(x)
-    alpha_atr = 1 / ATR_LEN
-    atr_series = tr.ewm(alpha=alpha_atr, adjust=False).mean()
-    x["atr"] = atr_series
-    x["atr_pct"] = x["atr"] / x["close"]
-    x["atr_pct"] = x["atr_pct"].replace([float("inf"), -float("inf")], float("nan"))
+    x["atr"] = atr(x, tr=tr)
+    x["atr_pct"] = (x["atr"] / x["close"]).replace([float("inf"), -float("inf")], float("nan"))
     x["atrpct_q75"] = x["atr_pct"].rolling(ATR_Q_LOOKBACK).quantile(0.75)
+    x["adx"] = adx(x, tr=tr)
 
     # MACD を concat せず直接代入（中間 DataFrame を作らない）
     macd_df = macd(x["close"])
@@ -145,17 +153,6 @@ def add_indicators(bars: pd.DataFrame) -> pd.DataFrame:
     x["macd_signal"] = macd_df["macd_signal"]
     x["macd_hist"] = macd_df["macd_hist"]
     x["macd_up"] = (x["macd_hist"] > 0).astype("int64")
-
-    # ADX: true_range を再計算せず adx() を直接呼ぶ代わりにインライン計算
-    up, down = x["high"].diff(), -x["low"].diff()
-    plus_dm = up.where((up > down) & (up > 0), 0.0)
-    minus_dm = down.where((down > up) & (down > 0), 0.0)
-    alpha_adx = 1 / ADX_LEN
-    atr_adx = tr.ewm(alpha=alpha_adx, adjust=False).mean().replace(0, float("nan"))
-    plus_di = 100 * plus_dm.ewm(alpha=alpha_adx, adjust=False).mean() / atr_adx
-    minus_di = 100 * minus_dm.ewm(alpha=alpha_adx, adjust=False).mean() / atr_adx
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, float("nan"))
-    x["adx"] = dx.ewm(alpha=alpha_adx, adjust=False).mean()
 
     x["don_high"] = x["high"].rolling(DON_TERM).max().shift(1)
     x["don_low"] = x["low"].rolling(DON_TERM).min().shift(1)

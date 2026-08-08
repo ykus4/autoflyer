@@ -18,6 +18,11 @@ _GMO_BASE = "https://api.coin.z.com/public"
 _BINANCE_BASE = "https://api.binance.com/api/v3/klines"
 
 
+def _to_ms(day: str) -> int:
+    """ISO 日付を UTC のエポックミリ秒に変換する。"""
+    return int(pd.Timestamp(day, tz="UTC").timestamp() * 1000)
+
+
 def _finalize(df: pd.DataFrame, out: Path) -> pd.DataFrame:
     """timestamp/dt 列を付与し、重複排除・ソートして CSV に保存する。"""
     df["timestamp"] = (df["timestamp_ms"] // 1000).astype("int64")
@@ -78,20 +83,24 @@ def fetch_gmo(start: str, end: str, output: str, overwrite: bool, sleep: float) 
     _finalize(new_df, out)
 
 
-def fetch_binance(start: str, end: str, symbol: str, output: str, sleep: float) -> None:
-    """Binance から日足 OHLCV を取得して CSV に保存する。"""
-    out = Path(output)
-    start_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
-    end_ms = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000)
-
+def _fetch_binance_klines(
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    sleep: float,
+    progress: bool = False,
+) -> list[dict]:
+    """[start_ms, end_ms) の日足を 1000 本ずつページングして取得する。"""
     rows: list[dict] = []
     cur_ms = start_ms
     while cur_ms < end_ms:
-        r = requests.get(
-            _BINANCE_BASE,
-            params={"symbol": symbol, "interval": "1d", "startTime": cur_ms, "limit": 1000},
-            timeout=30,
-        )
+        params: dict[str, str | int] = {
+            "symbol": symbol,
+            "interval": "1d",
+            "startTime": cur_ms,
+            "limit": 1000,
+        }
+        r = requests.get(_BINANCE_BASE, params=params, timeout=30)
         r.raise_for_status()
         batch = r.json()
         if not batch:
@@ -110,13 +119,25 @@ def fetch_binance(start: str, end: str, symbol: str, output: str, sleep: float) 
                 }
             )
         cur_ms = int(batch[-1][0]) + 1
-        print(f"  fetched {len(rows)} bars ...")
+        if progress:
+            print(f"  fetched {len(rows)} bars ...")
         time.sleep(sleep)
+    return rows
 
-    _finalize(pd.DataFrame(rows), out)
+
+def fetch_binance(start: str, end: str, symbol: str, output: str, sleep: float) -> None:
+    """Binance から日足 OHLCV を取得して CSV に保存する。"""
+    rows = _fetch_binance_klines(
+        symbol,
+        _to_ms(start),
+        _to_ms(end),
+        sleep,
+        progress=True,
+    )
+    _finalize(pd.DataFrame(rows), Path(output))
 
 
-def update(output: str, symbol: str) -> None:
+def update(output: str, symbol: str, sleep: float = 0.3) -> None:
     """CSV の最終日から今日まで Binance 日足を差分取得して追記する。"""
     out = Path(output)
     if not out.exists():
@@ -126,55 +147,18 @@ def update(output: str, symbol: str) -> None:
     existing = pd.read_csv(out)
     last_ts_ms = int(existing["timestamp_ms"].max())
     last_dt = pd.to_datetime(last_ts_ms, unit="ms", utc=True)
-    today_ms = int(pd.Timestamp(date.today().isoformat(), tz="UTC").timestamp() * 1000)
+    today_ms = _to_ms(date.today().isoformat())
 
     if last_ts_ms >= today_ms:
         print(f"すでに最新です ({last_dt.date()})")
         return
 
     print(f"差分取得: {last_dt.date()} の翌日 → 今日")
-
-    rows: list[dict] = []
-    cur_ms = last_ts_ms + 1
-    while cur_ms < today_ms:
-        r = requests.get(
-            _BINANCE_BASE,
-            params={"symbol": symbol, "interval": "1d", "startTime": cur_ms, "limit": 1000},
-            timeout=30,
-        )
-        r.raise_for_status()
-        batch = r.json()
-        if not batch:
-            break
-        for k in batch:
-            if int(k[0]) >= today_ms:
-                break
-            rows.append(
-                {
-                    "timestamp_ms": int(k[0]),
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
-                    "volume": float(k[5]),
-                }
-            )
-        cur_ms = int(batch[-1][0]) + 1
-        time.sleep(0.3)
-
+    rows = _fetch_binance_klines(symbol, last_ts_ms + 1, today_ms, sleep)
     if not rows:
         print("新しいデータはありませんでした。")
         return
 
-    new_df = pd.DataFrame(rows)
-    new_df["timestamp"] = (new_df["timestamp_ms"] // 1000).astype("int64")
-    new_df["dt"] = pd.to_datetime(new_df["timestamp"], unit="s", utc=True)
-    combined = (
-        pd.concat([existing, new_df], ignore_index=True)
-        .drop_duplicates(subset=["timestamp_ms"])
-        .sort_values("timestamp_ms")
-        .reset_index(drop=True)
-    )
-    combined.to_csv(out, index=False)
-    print(f"+{len(rows)} 行追加  合計 {len(combined):,} 行")
-    print(f"range: {combined['dt'].iloc[0]}  ->  {combined['dt'].iloc[-1]}")
+    combined = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True)
+    result = _finalize(combined, out)
+    print(f"+{len(rows)} 行追加  合計 {len(result):,} 行")

@@ -16,6 +16,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from .indicators import log_returns
+
 log = logging.getLogger("autoflyer.stats")
 
 
@@ -33,28 +35,29 @@ def hurst_exponent(close: pd.Series, lookback: int = 100) -> float:
 
     Returns 0.5 if insufficient data.
     """
-    series = close.iloc[-lookback:].values if len(close) >= lookback else close.values
+    series = close.iloc[-lookback:] if len(close) >= lookback else close
     if len(series) < 20:
         return 0.5
 
-    log_returns = np.diff(np.log(series))
-    if len(log_returns) < 20:
+    # 差分ベース（log_returns() の比率ベースとは丸め誤差が異なるためここでは使わない）
+    log_ret = np.diff(np.log(series.to_numpy(dtype=float)))
+    if len(log_ret) < 20:
         return 0.5
 
     # R/S analysis over multiple sub-periods
-    max_k = min(len(log_returns) // 2, 50)
+    max_k = min(len(log_ret) // 2, 50)
     if max_k < 8:
         return 0.5
 
     ns = []
     rs_vals = []
     for n in range(8, max_k + 1):
-        num_blocks = len(log_returns) // n
+        num_blocks = len(log_ret) // n
         if num_blocks < 1:
             continue
         rs_block = []
         for i in range(num_blocks):
-            block = log_returns[i * n : (i + 1) * n]
+            block = log_ret[i * n : (i + 1) * n]
             mean_b = block.mean()
             deviate = np.cumsum(block - mean_b)
             r = deviate.max() - deviate.min()
@@ -90,13 +93,17 @@ def hmm_regime(close: pd.Series, lookback: int = 252) -> int:
         2: bull (highest mean return state)
     """
     series = close.iloc[-lookback:] if len(close) >= lookback else close
-    log_ret = np.log(series / series.shift(1)).dropna().values.reshape(-1, 1)
+    log_ret = log_returns(series).reshape(-1, 1)
 
     if len(log_ret) < 30:
         return 1  # default: sideways
 
     try:
         from hmmlearn.hmm import GaussianHMM
+
+        # hmmlearn は収束しないたびに ConvergenceMonitor 経由でログを出す。
+        # バックテストでは何千回も呼ぶため出力を抑制する。
+        logging.getLogger("hmmlearn").setLevel(logging.ERROR)
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -141,7 +148,7 @@ def kelly_fraction(
     else:
         # Estimate from bar returns
         series = close.iloc[-lookback:] if len(close) >= lookback else close
-        returns = series.pct_change().dropna().values
+        returns = series.pct_change().dropna().to_numpy()
         if len(returns) < 10:
             return 0.5
 
@@ -178,7 +185,7 @@ def breakout_zscore(close: pd.Series, lookback: int = 100) -> float:
         return 0.0
 
     # Exclude current bar for unbiased estimate
-    hist = series.iloc[:-1].values
+    hist = series.iloc[:-1].to_numpy()
     current = float(series.iloc[-1])
     mean = hist.mean()
     std = hist.std(ddof=1)
@@ -207,8 +214,12 @@ def mae_optimal_stop(
 
     Returns ATR multiplier (e.g., 1.8 means stop at entry - 1.8*ATR).
     """
-    c = close.iloc[-lookback:].values if len(close) >= lookback else close.values
-    a = atr_series.iloc[-lookback:].values if len(atr_series) >= lookback else atr_series.values
+    c = close.iloc[-lookback:].to_numpy() if len(close) >= lookback else close.to_numpy()
+    a = (
+        atr_series.iloc[-lookback:].to_numpy()
+        if len(atr_series) >= lookback
+        else atr_series.to_numpy()
+    )
 
     if len(c) < 30 or len(a) < 30:
         return 1.5  # default fallback

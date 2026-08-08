@@ -7,12 +7,17 @@ BitFlyer FX_BTC_JPY automated trading bot using a MA-cross strategy. Single CLI 
 ```
 autoflyer/
 ├── autoflyer/
-│   ├── __main__.py          CLI entry point (thin parse + dispatch)
+│   ├── __main__.py          CLI entry point (thin parse + dispatch only)
 │   ├── config.py            Algorithm constants (MA periods, ATR length, etc.)
+│   ├── timeframes.py        Timeframe label parsing (`1D`/`3H` -> pandas rule)
+│   ├── logging_utils.py     JST log formatter and handler setup
 │   ├── notifications.py     Email alerts (SMTP)
 │   ├── dashboard.py         Monitoring dashboard API (FastAPI, port 8080)
 │   ├── trading/             Live trading
-│   │   ├── bot.py           Live trading loop, BitFlyerClient, retry logic
+│   │   ├── bot.py           BotConfig + LiveBot polling loop
+│   │   ├── client.py        BitFlyerClient REST wrapper, retry/backoff
+│   │   ├── state.py         state.json persistence + equity.jsonl log
+│   │   ├── signals.py       Entry rules shared by bot and backtester
 │   │   ├── strategy.py      Variant definitions (Variant dataclass, VARIANTS)
 │   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD, Supertrend)
 │   │   ├── garch_sizing.py  GARCH volatility-based position sizing
@@ -20,6 +25,7 @@ autoflyer/
 │   │   └── fees.py          bitFlyer fee tier model
 │   ├── analysis/            Backtesting and data
 │   │   ├── backtest.py      Vectorized backtest engine
+│   │   ├── runner.py        Backtest orchestration across variants/timeframes
 │   │   ├── fetch.py         OHLCV fetching (GMO/Binance, incremental update)
 │   │   ├── data.py          CSV loading and OHLCV resampling
 │   │   └── report.py        Aggregation and display
@@ -112,10 +118,20 @@ Previous best: `BREAKOUT_STOP1.5_GARCH40` (+136%, PF 2.62, DD 30.1% on the same 
 - **Commit as the repo owner** — always commit under the configured git user (`yotti`)
 - **Atomic commits** — one commit per feature or fix; do not bundle unrelated changes
 
+## Architecture Notes
+
+- **`trading/signals.py` is the single source of truth for entry rules.** The backtester
+  and the live bot both call `entry_signals()` / `long_ok()` / `position_size()`, so a
+  rule change applies to both. Never re-implement a filter in one engine only.
+- **Dependency direction is `analysis/` → `trading/`.** `trading/` must not import from
+  `analysis/`.
+- Runtime files (state, equity, logs) all live under `var/`.
+
 ## Key Files
 
 - [autoflyer/trading/strategy.py](autoflyer/trading/strategy.py) — add/modify strategy variants
-- [autoflyer/trading/bot.py](autoflyer/trading/bot.py) — live order logic, circuit breaker, retry, state persistence
+- [autoflyer/trading/signals.py](autoflyer/trading/signals.py) — entry filters, sizing, stops (shared)
+- [autoflyer/trading/bot.py](autoflyer/trading/bot.py) — live order logic, circuit breaker, state persistence
 - [autoflyer/notifications.py](autoflyer/notifications.py) — email notification module
 - [autoflyer/analysis/backtest.py](autoflyer/analysis/backtest.py) — vectorized backtest engine
 - [autoflyer/config.py](autoflyer/config.py) — constants (`START_CASH_JPY`, `TIMEFRAMES`, etc.)

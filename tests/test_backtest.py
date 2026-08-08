@@ -1,11 +1,12 @@
-"""Unit tests for btcfx.backtest."""
+"""Unit tests for the backtest engine."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from autoflyer.analysis.backtest import _apply_slippage, compute_signal, run
+from autoflyer.analysis.backtest import _apply_slippage, run
 from autoflyer.config import START_CASH_JPY
+from autoflyer.trading.signals import compute_signal
 from autoflyer.trading.strategy import Variant
 
 

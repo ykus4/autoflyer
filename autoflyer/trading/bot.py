@@ -1,30 +1,36 @@
-"""Live trading bot loop."""
+"""Live trading bot loop.
+
+Polls OHLCV, applies the same entry/exit rules as the backtester (see
+`trading.signals`), and places market orders on bitFlyer. All position state is
+persisted after every change so a restart resumes where it left off.
+"""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import hmac
-import json
 import logging
-import logging.handlers
 import os
-import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from ..analysis.backtest import compute_live_stop, compute_signal
-from ..notifications import create_notifier
+from ..logging_utils import setup_logging
+from ..notifications import EmailNotifier, create_notifier
+from .client import BitFlyerClient
 from .fees import FeeTierModel
-from .garch_sizing import garch_position_fraction
 from .indicators import add_indicators
+from .signals import breakout_signals, compute_signal, live_stop, long_ok, position_size
+from .signals import sizing_fraction as compute_sizing_fraction
+from .state import FLAT_STATE, append_equity, load_state, save_state
 from .strategy import VARIANTS, Variant
 
+log = logging.getLogger("autoflyer.bot")
+
+# 上位足トレンド確認に使う時間足の対応表
 _MTF_UP: dict[str, str] = {
     "1H": "4H",
     "3H": "1D",
@@ -32,297 +38,126 @@ _MTF_UP: dict[str, str] = {
     "12H": "3D",
     "1D": "3D",
 }
-_STATE_DEFAULT: dict = {
-    "in_pos": False,
-    "entry_price": None,
-    "btc": 0.0,
-    "entry_dt": None,
-    "stop_px": None,
-    "peak_cash": None,
-}
-
-_BF_BASE = "https://api.bitflyer.com"
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = 2.0  # seconds; doubles each attempt
+_MTF_MA_LEN = 50
+_FALLBACK_EQUITY_JPY = 100_000.0
 
 
-def _retry_request(func, *args, **kwargs):
-    """Retry a request function with exponential backoff."""
-    last_exc = None
-    for attempt in range(_MAX_RETRIES):
-        try:
-            return func(*args, **kwargs)
-        except requests.RequestException as e:
-            last_exc = e
-            if attempt < _MAX_RETRIES - 1:
-                wait = _RETRY_BACKOFF * (2**attempt)
-                logging.getLogger("autoflyer.bot").warning(
-                    "Request failed (attempt %d/%d): %s — retrying in %.1fs",
-                    attempt + 1,
-                    _MAX_RETRIES,
-                    e,
-                    wait,
-                )
-                time.sleep(wait)
-    raise last_exc  # type: ignore[misc]
+@dataclass(frozen=True)
+class BotConfig:
+    """1 回の起動分の設定。CLI 引数と環境変数から組み立てる。"""
+
+    symbol: str
+    timeframe: str
+    variant: Variant
+    dry_run: bool
+    amount_jpy: float
+    interval: int
+    state_file: Path
+    max_dd_pct: float
+    use_mtf: bool
+
+    @property
+    def product_code(self) -> str:
+        """bitFlyer の product_code はスラッシュなし (BTC_JPY / FX_BTC_JPY)。"""
+        return self.symbol.replace("/", "_")
+
+    @property
+    def equity_file(self) -> Path:
+        return self.state_file.with_name("equity.jsonl")
 
 
-class BitFlyerClient:
-    """BitFlyer Lightning REST APIの薄いラッパー。"""
+class LiveBot:
+    """ポーリングループ本体。1 サイクルが `step()` に対応する。"""
 
-    def __init__(self, api_key: str, api_secret: str) -> None:
-        self._key = api_key
-        self._secret = api_secret
-        self._session = requests.Session()
-        self._ohlcv_cache: dict[str, tuple[float, pd.DataFrame]] = {}  # tf -> (ts, df)
-        self._ohlcv_cache_ttl = 300.0  # 5 minutes
+    def __init__(
+        self,
+        cfg: BotConfig,
+        client: BitFlyerClient,
+        notifier: EmailNotifier,
+    ) -> None:
+        self.cfg = cfg
+        self.client = client
+        self.notifier = notifier
+        self.fees = FeeTierModel()
+        cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state = load_state(cfg.state_file)
+        self.cooldown_remaining = 0
+        self.last_dd_pct = 0.0
+        log.info("Loaded state: %s", self.state)
 
-    # ---- Public endpoints ----
+    # ---- 小さなヘルパー ----
 
-    def fetch_ticker(self, product_code: str) -> dict:
-        def _do():
-            resp = self._session.get(
-                f"{_BF_BASE}/v1/ticker",
-                params={"product_code": product_code},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            return resp.json()
+    def _save(self) -> None:
+        save_state(self.cfg.state_file, self.state)
 
-        return _retry_request(_do)
+    def _go_flat(self) -> None:
+        self.state.update(FLAT_STATE)
+        self._save()
 
-    def fetch_executions(
-        self, product_code: str, count: int = 500, before: int | None = None
-    ) -> list[dict]:
-        def _do():
-            params: dict = {"product_code": product_code, "count": count}
-            if before is not None:
-                params["before"] = before
-            resp = self._session.get(f"{_BF_BASE}/v1/getexecutions", params=params, timeout=15)
-            resp.raise_for_status()
-            return resp.json()
-
-        return _retry_request(_do)
-
-    def fetch_ohlcv(self, product_code: str, tf: str, limit: int = 300) -> pd.DataFrame:
-        """CoinGecko APIで日足/時間足OHLCVを取得する（キャッシュ付き）。"""
-        cache_key = f"{product_code}:{tf}:{limit}"
-        cached = self._ohlcv_cache.get(cache_key)
-        if cached and (time.time() - cached[0]) < self._ohlcv_cache_ttl:
-            return cached[1].copy()
-
-        days = _tf_to_coingecko_days(tf, limit)
-
-        def _do():
-            resp = self._session.get(
-                "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
-                params={"vs_currency": "jpy", "days": days},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-        data = _retry_request(_do)
-        df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close"])
-        df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        df["volume"] = 0.0
-        df = df[["dt", "open", "high", "low", "close", "volume"]]
-
-        # 時間足へのリサンプリングが必要な場合
-        rule = _tf_to_pandas_rule(tf)
-        if tf.upper() not in ("1D", "D"):
-            df = (
-                df.set_index("dt")
-                .resample(rule)
-                .agg(
-                    open=("open", "first"),
-                    high=("high", "max"),
-                    low=("low", "min"),
-                    close=("close", "last"),
-                    volume=("volume", "sum"),
-                )
-                .dropna()
-                .reset_index()
-            )
-
-        result = df.tail(limit).reset_index(drop=True)
-        self._ohlcv_cache[cache_key] = (time.time(), result)
-        return result.copy()
-
-    # ---- Private endpoints ----
-
-    def _auth_headers(self, method: str, path: str, body: str = "") -> dict:
-        ts = str(int(datetime.now(timezone.utc).timestamp()))
-        text = ts + method + path + body
-        sign = hmac.new(self._secret.encode(), text.encode(), hashlib.sha256).hexdigest()
-        return {
-            "ACCESS-KEY": self._key,
-            "ACCESS-TIMESTAMP": ts,
-            "ACCESS-SIGN": sign,
-            "Content-Type": "application/json",
-        }
-
-    def fetch_balance(self) -> dict:
-        def _do():
-            path = "/v1/me/getbalance"
-            headers = self._auth_headers("GET", path)
-            resp = self._session.get(f"{_BF_BASE}{path}", headers=headers, timeout=10)
-            resp.raise_for_status()
-            return resp.json()
-
-        # [{currency_code: "JPY", amount: ..., available: ...}, ...]
-        result = {}
-        for item in _retry_request(_do):
-            code = item["currency_code"]
-            result[code] = {"free": item["available"], "total": item["amount"]}
-        return result
-
-    def create_order(self, product_code: str, side: str, size: float) -> dict:
-        def _do():
-            path = "/v1/me/sendchildorder"
-            body_dict = {
-                "product_code": product_code,
-                "child_order_type": "MARKET",
-                "side": side.upper(),
-                "size": size,
-            }
-            body = json.dumps(body_dict)
-            headers = self._auth_headers("POST", path, body)
-            resp = self._session.post(f"{_BF_BASE}{path}", headers=headers, data=body, timeout=10)
-            resp.raise_for_status()
-            return resp.json()
-
-        return _retry_request(_do)
-
-
-_EQUITY_MAX_BYTES = 5 * 1024 * 1024  # 5MB per file
-
-
-def _append_equity(equity_file: Path, equity: float) -> None:
-    row = json.dumps({"dt": datetime.now(timezone.utc).isoformat(), "equity": equity})
-    with equity_file.open("a", encoding="utf-8") as f:
-        f.write(row + "\n")
-    # Rotate if file exceeds size limit
-    if equity_file.exists() and equity_file.stat().st_size > _EQUITY_MAX_BYTES:
-        rotated = equity_file.with_suffix(".jsonl.1")
-        if rotated.exists():
-            rotated.unlink()
-        equity_file.rename(rotated)
-
-
-def run(args: argparse.Namespace) -> None:
-    load_dotenv()
-
-    api_key = os.environ.get("BITFLYER_API_KEY", "")
-    api_secret = os.environ.get("BITFLYER_API_SECRET", "")
-    dry_run = not args.live
-    symbol = args.symbol
-    timeframe = args.timeframe[0] if args.timeframe else os.environ.get("TIMEFRAME", "1D")
-    amount_jpy: float = args.amount
-    interval: int = args.interval
-    state_file = Path(args.state)
-    equity_file = state_file.with_name("equity.jsonl")
-    max_dd_pct: float = args.max_dd_pct
-
-    variant = _resolve_variant(args.variant or os.environ.get("VARIANT", "STOP_3ATR"))
-    log = _setup_logging(args.log_file, symbol, timeframe, variant, dry_run, max_dd_pct)
-
-    client = BitFlyerClient(api_key, api_secret)
-    notifier = create_notifier()
-    state = _load_state(state_file, log)
-    log.info("Loaded state: %s", state)
-    fee_model = FeeTierModel()
-
-    # product_codeはスラッシュなし (BTC_JPY / FX_BTC_JPY)
-    product_code = symbol.replace("/", "_") if "/" in symbol else symbol
-    cooldown_remaining: int = 0
-
-    def fetch_bars(tf: str, limit: int = 300) -> pd.DataFrame:
-        return client.fetch_ohlcv(product_code, tf, limit)
-
-    def market_order(side: str, btc: float) -> dict | None:
-        if dry_run:
-            log.info("[DRY_RUN] %s %s %.8f BTC", side.upper(), product_code, btc)
+    def _market_order(self, side: str, btc: float) -> dict | None:
+        if self.cfg.dry_run:
+            log.info("[DRY_RUN] %s %s %.8f BTC", side.upper(), self.cfg.product_code, btc)
             return {"id": "dry_run"}
-        order = client.create_order(product_code, side, btc)
+        order = self.client.create_order(self.cfg.product_code, side, btc)
         log.info("Order placed: %s", order)
         return order
 
-    def _entry_ok(bars_ind: pd.DataFrame, side: str) -> bool:
-        """バックテストと同じエントリーフィルターを適用する。"""
-        cur = bars_ind.iloc[-2]  # 最新確定バー
-        if side == "long":
-            if variant.use_ma200_filter and int(cur.get("regime_up", 0)) != 1:
-                log.info("Filter blocked: MA200 regime_up=0")
-                return False
-            if variant.rsi_min is not None and (
-                pd.isna(cur.get("rsi")) or float(cur["rsi"]) < variant.rsi_min
-            ):
-                log.info("Filter blocked: RSI=%.1f < min=%.1f", cur.get("rsi", 0), variant.rsi_min)
-                return False
-            if (
-                variant.atr_high_avoid
-                and pd.notna(cur.get("atr_pct"))
-                and pd.notna(cur.get("atrpct_q75"))
-                and float(cur["atr_pct"]) > float(cur["atrpct_q75"])
-            ):
-                log.info("Filter blocked: ATR volatility too high")
-                return False
-            if variant.require_don_break and int(cur.get("don_break_up", 0)) != 1:
-                log.info("Filter blocked: no Donchian breakout")
-                return False
-            if variant.adx_min is not None and (
-                pd.isna(cur.get("adx")) or float(cur["adx"]) < variant.adx_min
-            ):
-                log.info("Filter blocked: ADX=%.1f < min=%.1f", cur.get("adx", 0), variant.adx_min)
-                return False
-        else:  # short
-            if int(cur.get("regime_up", 1)) != 0:
-                log.info("Filter blocked: regime_up=1, short not allowed")
-                return False
-            if variant.adx_min is not None and (
-                pd.isna(cur.get("adx")) or float(cur["adx"]) < variant.adx_min
-            ):
-                log.info("Filter blocked: ADX=%.1f < min=%.1f", cur.get("adx", 0), variant.adx_min)
-                return False
-        return True
+    def _estimated_equity(self, cur_price: float, btc_held: float, entry_price: float) -> float:
+        """残高が取れないときの推定資産。"""
+        base = self.cfg.amount_jpy or _FALLBACK_EQUITY_JPY
+        if not self.state["in_pos"]:
+            return base
+        return (cur_price - entry_price) * btc_held + base
 
-    def _compute_size(jpy: float, price: float, stop_px: float | None, fee_rate: float) -> float:
-        """バックテストと同じサイジングロジック: GARCH + リスクベース。"""
-        # GARCH fraction
-        if variant.garch_target_vol > 0:
-            close_series = bars_ind["close"].iloc[:-1]  # 確定バーのみ
-            garch_frac = garch_position_fraction(close_series, target_vol=variant.garch_target_vol)
-            log.info("GARCH fraction: %.3f (target_vol=%.2f)", garch_frac, variant.garch_target_vol)
+    def _current_price(self, bars: pd.DataFrame) -> float:
+        if self.cfg.dry_run:
+            return float(bars["close"].iloc[-1])
+        return float(self.client.fetch_ticker(self.cfg.product_code)["ltp"])
+
+    def _current_equity(self, cur_price: float, btc_held: float, entry_price: float) -> float:
+        if self.cfg.dry_run:
+            return self._estimated_equity(cur_price, btc_held, entry_price)
+        try:
+            bal = self.client.fetch_balance()
+            jpy_balance = float(bal.get("JPY", {}).get("free", 0))
+            btc_balance = float(bal.get("BTC", {}).get("free", 0))
+            equity = jpy_balance + btc_balance * cur_price
+            log.info("残高: JPY=%.0f  BTC=%.6f  資産合計=%.0f", jpy_balance, btc_balance, equity)
+            return equity
+        except (requests.RequestException, KeyError, ValueError) as e:
+            equity = self._estimated_equity(cur_price, btc_held, entry_price)
+            log.warning("残高取得失敗 (%s) — 推定値で資産計算: %.0f JPY", e, equity)
+            return equity
+
+    def _available_jpy(self) -> float:
+        """エントリーに使える資金。`--amount` があれば上限として適用する。"""
+        if self.cfg.dry_run:
+            jpy = self.cfg.amount_jpy or _FALLBACK_EQUITY_JPY
         else:
-            garch_frac = 1.0
+            try:
+                jpy = float(self.client.fetch_balance().get("JPY", {}).get("free", 0))
+            except (requests.RequestException, KeyError, ValueError) as e:
+                jpy = self.cfg.amount_jpy or _FALLBACK_EQUITY_JPY
+                log.warning("残高取得失敗 (%s) — フォールバック %.0f JPY を使用", e, jpy)
+        return min(jpy, self.cfg.amount_jpy) if self.cfg.amount_jpy > 0 else jpy
 
-        max_btc = jpy * garch_frac / (price * (1.0 + fee_rate))
-
-        # リスクベースサイジング
-        if variant.risk_pct > 0 and stop_px is not None and price > 0:
-            stop_width = abs(price - stop_px)
-            if stop_width > 0:
-                btc = (jpy * garch_frac * variant.risk_pct / 100.0) / stop_width
-                return round(min(btc, max_btc), 8)
-
-        return round(max_btc, 8)
-
-    def mtf_trend_ok() -> bool:
-        if not args.use_mtf:
+    def _mtf_trend_ok(self) -> bool:
+        """上位足が上昇トレンドか。取得に失敗したらエントリーを止めない。"""
+        if not self.cfg.use_mtf:
             return True
-        tf_up = _MTF_UP.get(timeframe.upper())
+        tf_up = _MTF_UP.get(self.cfg.timeframe.upper())
         if tf_up is None:
             return True
         try:
-            bars_up = fetch_bars(tf_up, limit=100)
-            ma50 = bars_up["close"].rolling(50).mean().iloc[-1]
-            trend_up = float(bars_up["close"].iloc[-1]) > float(ma50)
+            bars_up = self.client.fetch_ohlcv(self.cfg.product_code, tf_up, limit=100)
+            ma = bars_up["close"].rolling(_MTF_MA_LEN).mean().iloc[-1]
+            trend_up = float(bars_up["close"].iloc[-1]) > float(ma)
             log.info(
-                "MTF(%s) close=%.0f MA50=%.0f trend_up=%s",
+                "MTF(%s) close=%.0f MA%d=%.0f trend_up=%s",
                 tf_up,
                 bars_up["close"].iloc[-1],
-                ma50,
+                _MTF_MA_LEN,
+                ma,
                 trend_up,
             )
             return trend_up
@@ -330,266 +165,207 @@ def run(args: argparse.Namespace) -> None:
             log.warning("MTF fetch failed (%s) — allowing entry", e)
             return True
 
-    while True:
-        try:
-            bars = fetch_bars(timeframe)
-            bars_ind = add_indicators(bars)
-            cross_up, cross_down = compute_signal(bars)
-            fee_model.step(pd.Timestamp(bars["dt"].iloc[-2]))
+    # ---- サイクルの各段階 ----
 
-            # ブレイクアウトエントリーモード: ドンチャンチャネルの突破を検出
-            if variant.breakout_entry:
-                confirmed = bars_ind.iloc[-2]  # 最新確定バー
-                breakout_up = bool(
-                    pd.notna(confirmed.get("don_high"))
-                    and float(confirmed["high"]) > float(confirmed["don_high"])
-                )
-                breakout_down = bool(
-                    pd.notna(confirmed.get("don_low"))
-                    and float(confirmed["low"]) < float(confirmed["don_low"])
-                )
-            else:
-                breakout_up = False
-                breakout_down = False
+    def _entry_signals(self, bars: pd.DataFrame, bars_ind: pd.DataFrame) -> tuple[bool, bool]:
+        """(signal_up, signal_down)。ブレイクアウトモードは最新確定バーで判定する。"""
+        if self.cfg.variant.breakout_entry:
+            return breakout_signals(bars_ind.iloc[-2])
+        return compute_signal(bars)
 
-            # エントリーシグナル選択
-            signal_up = breakout_up if variant.breakout_entry else cross_up
-            signal_down = breakout_down if variant.breakout_entry else cross_down
+    def _check_circuit_breaker(self, cur_equity: float, cur_price: float) -> bool:
+        """ドローダウンが閾値に達したらポジションを閉じて True を返す（＝停止）。"""
+        peak = self.state["peak_cash"]
+        dd_pct = (1.0 - cur_equity / peak) * 100 if peak else 0.0
+        self.last_dd_pct = dd_pct
+        if dd_pct < self.cfg.max_dd_pct:
+            return False
 
-            if not dry_run:
-                ticker = client.fetch_ticker(product_code)
-                cur_price = float(ticker["ltp"])
-            else:
-                cur_price = float(bars["close"].iloc[-1])
+        log.critical(
+            "CIRCUIT BREAKER: drawdown %.1f%% >= %.1f%% — closing position and stopping.",
+            dd_pct,
+            self.cfg.max_dd_pct,
+        )
+        self.notifier.send(
+            "CIRCUIT BREAKER 発動",
+            f"ドローダウン {dd_pct:.1f}% が閾値 {self.cfg.max_dd_pct:.1f}% に到達。\n"
+            f"Bot を停止しポジションをクローズします。\n"
+            f"資産: {cur_equity:,.0f} JPY / ピーク: {peak:,.0f} JPY",
+        )
+        btc = float(self.state.get("btc", 0.0))
+        if self.state["in_pos"] and btc > 0 and self._market_order("sell", btc):
+            log.critical("CIRCUIT BREAKER: sold %.8f BTC @ ~%.0f JPY", btc, cur_price)
+            self._go_flat()
+        return True
 
-            entry_price_val = float(state["entry_price"]) if state["entry_price"] else cur_price
-            btc_held = float(state.get("btc", 0.0))
+    def _refresh_stop(self, bars_ind: pd.DataFrame, entry_price: float) -> None:
+        """毎サイクル最新 ATR でストップ価格を引き直す。"""
+        if not self.state["in_pos"] or self.cfg.variant.atr_stop_mult <= 0:
+            return
+        new_stop = live_stop(bars_ind, entry_price, "long", self.cfg.variant)
+        if new_stop is not None and new_stop != self.state.get("stop_px"):
+            log.info("Stop updated: %.0f → %.0f", self.state.get("stop_px") or 0, new_stop)
+            self.state["stop_px"] = new_stop
+            self._save()
 
-            if dry_run:
-                cur_equity = (
-                    (cur_price - entry_price_val) * btc_held + (amount_jpy or 100_000)
-                    if state["in_pos"]
-                    else (amount_jpy or 100_000)
-                )
-            else:
-                try:
-                    bal = client.fetch_balance()
-                    jpy_balance = float(bal.get("JPY", {}).get("free", 0))
-                    btc_balance = float(bal.get("BTC", {}).get("free", 0))
-                    cur_equity = jpy_balance + btc_balance * cur_price
-                    log.info(
-                        "残高: JPY=%.0f  BTC=%.6f  資産合計=%.0f",
-                        jpy_balance,
-                        btc_balance,
-                        cur_equity,
-                    )
-                except (requests.RequestException, KeyError, ValueError) as e:
-                    cur_equity = (
-                        (cur_price - entry_price_val) * btc_held + (amount_jpy or 100_000)
-                        if state["in_pos"]
-                        else (amount_jpy or 100_000)
-                    )
-                    log.warning("残高取得失敗 (%s) — 推定値で資産計算: %.0f JPY", e, cur_equity)
+    def _close_position(
+        self,
+        bars: pd.DataFrame,
+        cur_price: float,
+        btc_held: float,
+        entry_price: float,
+        *,
+        subject: str,
+        headline: str,
+        log_label: str,
+    ) -> bool:
+        if not self._market_order("sell", btc_held):
+            return False
+        self.fees.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc_held * cur_price)
+        pnl = (cur_price - entry_price) * btc_held
+        log.info("%s  %.8f BTC @ %.0f JPY  pnl≈%.0f", log_label, btc_held, cur_price, pnl)
+        self.notifier.send(
+            subject,
+            f"{headline}\n売却: {btc_held:.8f} BTC @ {cur_price:,.0f} JPY\n損益: {pnl:+,.0f} JPY",
+        )
+        self._go_flat()
+        return True
 
-            if state["peak_cash"] is None or cur_equity > state["peak_cash"]:
-                state["peak_cash"] = cur_equity
-                _save_state(state_file, state)
-            _append_equity(equity_file, cur_equity)
+    def _try_enter(self, bars: pd.DataFrame, bars_ind: pd.DataFrame, cur_price: float) -> None:
+        confirmed = bars_ind.iloc[-2]
+        close_hist = bars_ind["close"].iloc[:-1]  # 確定バーのみ
+        v = self.cfg.variant
 
-            dd_pct = (1.0 - cur_equity / state["peak_cash"]) * 100 if state["peak_cash"] else 0.0
-            if dd_pct >= max_dd_pct:
-                log.critical(
-                    "CIRCUIT BREAKER: drawdown %.1f%% >= %.1f%% — closing position and stopping.",
-                    dd_pct,
-                    max_dd_pct,
-                )
-                notifier.send(
-                    "CIRCUIT BREAKER 発動",
-                    f"ドローダウン {dd_pct:.1f}% が閾値 {max_dd_pct:.1f}% に到達。\n"
-                    f"Bot を停止しポジションをクローズします。\n"
-                    f"資産: {cur_equity:,.0f} JPY / ピーク: {state['peak_cash']:,.0f} JPY",
-                )
-                if (
-                    state["in_pos"]
-                    and float(state.get("btc", 0.0)) > 0
-                    and market_order("sell", float(state["btc"]))
-                ):
-                    log.critical(
-                        "CIRCUIT BREAKER: sold %.8f BTC @ ~%.0f JPY",
-                        state["btc"],
-                        cur_price,
-                    )
-                    state.update(
-                        in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
-                    )
-                    _save_state(state_file, state)
-                break
+        if not self._mtf_trend_ok():
+            log.info("MTF filter blocked long entry")
+            return
+        if not long_ok(
+            confirmed, v, close_hist, on_reject=lambda r: log.info("Filter blocked: %s", r)
+        ):
+            return
 
-            # ストップ価格を毎サイクル最新ATRで更新
-            if state["in_pos"] and variant.atr_stop_mult > 0:
-                new_stop = compute_live_stop(bars_ind, entry_price_val, "long", variant)
-                if new_stop is not None and new_stop != state.get("stop_px"):
-                    log.info("Stop updated: %.0f → %.0f", state.get("stop_px") or 0, new_stop)
-                    state["stop_px"] = new_stop
-                    _save_state(state_file, state)
+        jpy = self._available_jpy()
+        log.info("使用資金: %.0f JPY  fee_rate=%.4f%%", jpy, self.fees.rate * 100)
+        stop_px = live_stop(bars_ind, cur_price, "long", v)
+        frac = compute_sizing_fraction(close_hist, v)
+        if frac != 1.0:
+            log.info("Sizing fraction: %.3f", frac)
+        btc = round(position_size(jpy, cur_price, stop_px, self.fees.rate, v, frac), 8)
+        if btc <= 0 or not self._market_order("buy", btc):
+            return
 
-            if (
-                state["in_pos"]
-                and state.get("stop_px") is not None
-                and cur_price <= float(state["stop_px"])
+        self.fees.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc * cur_price)
+        self.state.update(
+            in_pos=True,
+            entry_price=cur_price,
+            btc=btc,
+            entry_dt=bars.iloc[-2]["dt"].isoformat(),
+            stop_px=stop_px,
+        )
+        self._save()
+        log.info("ENTRY  %.8f BTC @ %.0f JPY  stop_px=%s", btc, cur_price, stop_px)
+        self.notifier.send(
+            "ENTRY — ポジション取得",
+            f"買いエントリーしました。\n"
+            f"購入: {btc:.8f} BTC @ {cur_price:,.0f} JPY\n"
+            f"ストップ: {stop_px}",
+        )
+
+    # ---- 1 サイクル ----
+
+    def step(self) -> bool:
+        """1 サイクル実行する。停止すべきときだけ False を返す。"""
+        bars = self.client.fetch_ohlcv(self.cfg.product_code, self.cfg.timeframe)
+        bars_ind = add_indicators(bars)
+        self.fees.step(pd.Timestamp(bars["dt"].iloc[-2]))
+        signal_up, signal_down = self._entry_signals(bars, bars_ind)
+
+        cur_price = self._current_price(bars)
+        entry_price = float(self.state["entry_price"] or cur_price)
+        btc_held = float(self.state.get("btc", 0.0))
+
+        cur_equity = self._current_equity(cur_price, btc_held, entry_price)
+        if self.state["peak_cash"] is None or cur_equity > self.state["peak_cash"]:
+            self.state["peak_cash"] = cur_equity
+            self._save()
+        append_equity(self.cfg.equity_file, cur_equity)
+
+        if self._check_circuit_breaker(cur_equity, cur_price):
+            return False
+
+        self._refresh_stop(bars_ind, entry_price)
+
+        stop_px = self.state.get("stop_px")
+        if self.state["in_pos"] and stop_px is not None and cur_price <= float(stop_px):
+            if self._close_position(
+                bars,
+                cur_price,
+                btc_held,
+                entry_price,
+                subject="STOP HIT — ポジション決済",
+                headline="ストップロスに到達しました。",
+                log_label="STOP HIT",
             ):
-                if market_order("sell", btc_held):
-                    fee_model.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc_held * cur_price)
-                    pnl = (cur_price - entry_price_val) * btc_held
-                    log.info("STOP HIT  %.8f BTC @ %.0f JPY  pnl≈%.0f", btc_held, cur_price, pnl)
-                    notifier.send(
-                        "STOP HIT — ポジション決済",
-                        f"ストップロスに到達しました。\n"
-                        f"売却: {btc_held:.8f} BTC @ {cur_price:,.0f} JPY\n"
-                        f"損益: {pnl:+,.0f} JPY",
-                    )
-                    state.update(
-                        in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
-                    )
-                    _save_state(state_file, state)
-                    cooldown_remaining = variant.cooldown_bars
-                time.sleep(interval)
-                continue
+                self.cooldown_remaining = self.cfg.variant.cooldown_bars
+            return True
 
-            # クールダウン減算
-            if cooldown_remaining > 0:
-                log.info("Cooldown: %d bars remaining", cooldown_remaining)
-                cooldown_remaining -= 1
+        if self.cooldown_remaining > 0:
+            log.info("Cooldown: %d bars remaining", self.cooldown_remaining)
+            self.cooldown_remaining -= 1
 
-            log.info(
-                "signal_up=%s  signal_down=%s  in_pos=%s  dd=%.1f%%  cooldown=%d",
-                signal_up,
-                signal_down,
-                state["in_pos"],
-                dd_pct,
-                cooldown_remaining,
+        log.info(
+            "signal_up=%s  signal_down=%s  in_pos=%s  dd=%.1f%%  cooldown=%d",
+            signal_up,
+            signal_down,
+            self.state["in_pos"],
+            self.last_dd_pct,
+            self.cooldown_remaining,
+        )
+
+        if signal_up and not self.state["in_pos"] and self.cooldown_remaining <= 0:
+            self._try_enter(bars, bars_ind, cur_price)
+        elif signal_down and self.state["in_pos"]:
+            self._close_position(
+                bars,
+                cur_price,
+                btc_held,
+                entry_price,
+                subject="EXIT — ポジション決済",
+                headline="シグナルによりポジションを決済しました。",
+                log_label="EXIT",
             )
+        return True
 
-            if signal_up and not state["in_pos"] and cooldown_remaining <= 0:
-                if not mtf_trend_ok():
-                    log.info("MTF filter blocked long entry")
-                elif not _entry_ok(bars_ind, "long"):
-                    pass  # ログは _entry_ok 内で出力済み
-                else:
-                    if not dry_run:
-                        try:
-                            bal = client.fetch_balance()
-                            jpy = float(bal.get("JPY", {}).get("free", 0))
-                        except (requests.RequestException, KeyError, ValueError) as e:
-                            jpy = amount_jpy or 100_000
-                            log.warning(
-                                "残高取得失敗 (%s) — フォールバック %.0f JPY を使用", e, jpy
-                            )
-                    else:
-                        jpy = amount_jpy or 100_000
-                    if amount_jpy > 0:
-                        jpy = min(jpy, amount_jpy)
-                    log.info("使用資金: %.0f JPY  fee_rate=%.4f%%", jpy, fee_model.rate * 100)
-                    stop_px = compute_live_stop(bars_ind, cur_price, "long", variant)
-                    btc = _compute_size(jpy, cur_price, stop_px, fee_model.rate)
-                    if btc > 0 and market_order("buy", btc):
-                        fee_model.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc * cur_price)
-                        state.update(
-                            in_pos=True,
-                            entry_price=cur_price,
-                            btc=btc,
-                            entry_dt=bars.iloc[-2]["dt"].isoformat(),
-                            stop_px=stop_px,
-                        )
-                        _save_state(state_file, state)
-                        log.info("ENTRY  %.8f BTC @ %.0f JPY  stop_px=%s", btc, cur_price, stop_px)
-                        notifier.send(
-                            "ENTRY — ポジション取得",
-                            f"買いエントリーしました。\n"
-                            f"購入: {btc:.8f} BTC @ {cur_price:,.0f} JPY\n"
-                            f"ストップ: {stop_px}",
-                        )
+    def run_forever(self) -> None:
+        while True:
+            try:
+                if not self.step():
+                    return
+            except requests.HTTPError as e:
+                log.error("HTTP error: %s", e)
+                self.notifier.send("HTTP エラー", f"API呼び出しでHTTPエラーが発生しました。\n{e}")
+            except requests.RequestException as e:
+                log.error("Network error: %s", e)
+                self.notifier.send("ネットワークエラー", f"API通信に失敗しました。\n{e}")
+            except (ValueError, KeyError, TypeError) as e:
+                log.exception("Data processing error: %s", e)
+                self.notifier.send(
+                    "データ処理エラー",
+                    f"データの処理中にエラーが発生しました。\n{type(e).__name__}: {e}",
+                )
+            except Exception as e:  # noqa: BLE001 — ループを絶対に落とさない
+                log.exception("Unexpected error: %s", e)
+                self.notifier.send(
+                    "予期しないエラー",
+                    f"Botで予期しないエラーが発生しました。確認してください。\n"
+                    f"{type(e).__name__}: {e}",
+                )
 
-            elif signal_down and state["in_pos"]:
-                pnl = (cur_price - entry_price_val) * btc_held
-                if market_order("sell", btc_held):
-                    fee_model.record_fill(pd.Timestamp(bars["dt"].iloc[-1]), btc_held * cur_price)
-                    log.info("EXIT  %.8f BTC @ %.0f JPY  pnl≈%.0f", btc_held, cur_price, pnl)
-                    notifier.send(
-                        "EXIT — ポジション決済",
-                        f"シグナルによりポジションを決済しました。\n"
-                        f"売却: {btc_held:.8f} BTC @ {cur_price:,.0f} JPY\n"
-                        f"損益: {pnl:+,.0f} JPY",
-                    )
-                    state.update(
-                        in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None
-                    )
-                    _save_state(state_file, state)
-
-        except requests.HTTPError as e:
-            log.error("HTTP error: %s", e)
-            notifier.send("HTTP エラー", f"API呼び出しでHTTPエラーが発生しました。\n{e}")
-        except requests.RequestException as e:
-            log.error("Network error: %s", e)
-            notifier.send("ネットワークエラー", f"API通信に失敗しました。\n{e}")
-        except (ValueError, KeyError, TypeError) as e:
-            log.exception("Data processing error: %s", e)
-            notifier.send(
-                "データ処理エラー",
-                f"データの処理中にエラーが発生しました。\n{type(e).__name__}: {e}",
-            )
-        except Exception as e:
-            log.exception("Unexpected error: %s", e)
-            notifier.send(
-                "予期しないエラー",
-                f"Botで予期しないエラーが発生しました。確認してください。\n{type(e).__name__}: {e}",
-            )
-
-        log.info("Sleeping %ds...", interval)
-        time.sleep(interval)
+            log.info("Sleeping %ds...", self.cfg.interval)
+            time.sleep(self.cfg.interval)
 
 
-# =========================
-# 内部ヘルパー
-# =========================
-
-
-def _tf_to_coingecko_days(tf: str, limit: int) -> int:
-    minutes = {"1H": 60, "3H": 180, "4H": 240, "6H": 360, "12H": 720, "1D": 1440, "3D": 4320}
-    m = minutes.get(tf.upper().strip(), 1440)
-    days = max(1, (m * limit) // 1440 + 1)
-    # CoinGeckoは1/7/14/30/90/180/365/maxのみ有効
-    for d in [1, 7, 14, 30, 90, 180, 365]:
-        if d >= days:
-            return d
-    return 365
-
-
-def _tf_to_seconds(tf: str) -> int:
-    mapping = {
-        "1H": 3600,
-        "3H": 10800,
-        "4H": 14400,
-        "6H": 21600,
-        "12H": 43200,
-        "1D": 86400,
-        "3D": 259200,
-    }
-    v = mapping.get(tf.upper().strip())
-    if v is None:
-        raise ValueError(f"Unsupported timeframe: {tf}")
-    return v
-
-
-def _tf_to_pandas_rule(tf: str) -> str:
-    mapping = {"1H": "1h", "3H": "3h", "4H": "4h", "6H": "6h", "12H": "12h", "1D": "1D", "3D": "3D"}
-    v = mapping.get(tf.upper().strip())
-    if v is None:
-        raise ValueError(f"Unsupported timeframe: {tf}")
-    return v
-
-
-def _resolve_variant(name: str) -> Variant:
+def resolve_variant(name: str) -> Variant:
     v = next((v for v in VARIANTS if v.name == name), None)
     if v is None:
         raise SystemExit(
@@ -598,78 +374,37 @@ def _resolve_variant(name: str) -> Variant:
     return v
 
 
-class _JSTFormatter(logging.Formatter):
-    _JST = timezone(timedelta(hours=9))
+def _config_from_args(args: argparse.Namespace) -> BotConfig:
+    return BotConfig(
+        symbol=args.symbol,
+        timeframe=args.timeframe[0] if args.timeframe else os.environ.get("TIMEFRAME", "1D"),
+        variant=resolve_variant(args.variant or os.environ.get("VARIANT", "STOP_3ATR")),
+        dry_run=not args.live,
+        amount_jpy=args.amount,
+        interval=args.interval,
+        state_file=Path(args.state),
+        max_dd_pct=args.max_dd_pct,
+        use_mtf=args.use_mtf,
+    )
 
-    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        dt = datetime.fromtimestamp(record.created, tz=self._JST)
-        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
 
-
-def _setup_logging(
-    log_file: str | None,
-    symbol: str,
-    timeframe: str,
-    variant: Variant,
-    dry_run: bool,
-    max_dd_pct: float,
-) -> logging.Logger:
-    fmt = "%(asctime)s [%(levelname)s] %(message)s"
-    formatter = _JSTFormatter(fmt, datefmt="%Y-%m-%d %H:%M:%S")
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if log_file:
-        handlers.append(
-            logging.handlers.RotatingFileHandler(
-                log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
-            )
-        )
-    for h in handlers:
-        h.setFormatter(formatter)
-    logging.basicConfig(level=logging.INFO, handlers=handlers)
-    log = logging.getLogger("autoflyer.bot")
+def run(args: argparse.Namespace) -> None:
+    load_dotenv()
+    setup_logging(args.log_file)
+    cfg = _config_from_args(args)
     log.info(
         "Bot start — symbol=%s  tf=%s  variant=%s  dry_run=%s  max_dd=%.1f%%",
-        symbol,
-        timeframe,
-        variant.name,
-        dry_run,
-        max_dd_pct,
+        cfg.symbol,
+        cfg.timeframe,
+        cfg.variant.name,
+        cfg.dry_run,
+        cfg.max_dd_pct,
     )
-    return log
+    client = BitFlyerClient(
+        os.environ.get("BITFLYER_API_KEY", ""),
+        os.environ.get("BITFLYER_API_SECRET", ""),
+    )
+    LiveBot(cfg, client, create_notifier()).run_forever()
 
 
-def _load_state(state_file: Path, log: logging.Logger) -> dict:
-    if not state_file.exists():
-        return dict(_STATE_DEFAULT)
-    try:
-        data = json.loads(state_file.read_text())
-        for k, v in _STATE_DEFAULT.items():
-            data.setdefault(k, v)
-        # Validate logical consistency
-        if data["in_pos"] and (not data.get("entry_price") or float(data.get("btc", 0)) <= 0):
-            log.warning(
-                "State inconsistency: in_pos=True but entry_price=%s, btc=%s — resetting",
-                data.get("entry_price"),
-                data.get("btc"),
-            )
-            data.update(in_pos=False, entry_price=None, btc=0.0, entry_dt=None, stop_px=None)
-            _save_state(state_file, data)
-        if not data["in_pos"] and float(data.get("btc", 0)) > 0:
-            log.warning(
-                "State inconsistency: in_pos=False but btc=%.8f — resetting btc to 0",
-                float(data["btc"]),
-            )
-            data["btc"] = 0.0
-            _save_state(state_file, data)
-        return data
-    except (json.JSONDecodeError, OSError) as e:
-        backup = state_file.with_suffix(".json.bak")
-        shutil.copy2(state_file, backup)
-        log.error("state.json corrupt (%s) — reset to default, backup: %s", e, backup)
-        return dict(_STATE_DEFAULT)
-
-
-def _save_state(state_file: Path, state: dict) -> None:
-    tmp = state_file.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, default=str))
-    tmp.replace(state_file)
+__all__ = ["BotConfig", "LiveBot", "resolve_variant", "run"]

@@ -12,20 +12,22 @@ from ..config import (
     ATR_LEN,
     ATR_Q_LOOKBACK,
     DON_TERM,
-    MA_FAST,
     MA_SLOW,
     MACD_SLOW,
     REGIME_MA_LEN,
 )
 from ..trading.fees import FeeTierModel
 from ..trading.indicators import add_indicators, supertrend
-from ..trading.stats_filters import (
-    breakout_zscore,
-    hmm_regime,
-    hurst_exponent,
-    kelly_fraction,
-    mae_optimal_stop,
+from ..trading.signals import (
+    cross_down,
+    cross_up,
+    entry_signals,
+    long_ok,
+    position_size,
+    short_ok,
+    sizing_fraction,
 )
+from ..trading.stats_filters import mae_optimal_stop
 from ..trading.strategy import Variant
 
 _WARMUP = max(MA_SLOW, REGIME_MA_LEN, MACD_SLOW, ADX_LEN, ATR_LEN, DON_TERM, ATR_Q_LOOKBACK) + 3
@@ -36,60 +38,12 @@ class _Position:
     side: str
     btc: float
     entry_price: float
-    entry_dt: object
+    entry_dt: pd.Timestamp
     entry_fee_rate: float
     stop_px: float | None = None
     trail_best: float | None = None
     tp_px: float | None = None  # 利確ターゲット
     tp_hit: bool = False  # 利確到達フラグ（トレーリング移行用）
-
-
-def compute_signal(bars: pd.DataFrame) -> tuple[bool, bool]:
-    """
-    終値確定済み直近 2 バーで MA クロスを判定する。
-    最新バー（未確定）は除外する。
-    Returns (cross_up, cross_down).
-    """
-    x = bars.iloc[:-1].copy().reset_index(drop=True)
-    if len(x) < MA_SLOW + 2:
-        return False, False
-
-    fast = x["close"].rolling(MA_FAST).mean()
-    slow = x["close"].rolling(MA_SLOW).mean()
-
-    if pd.isna(fast.iloc[-1]) or pd.isna(fast.iloc[-2]):
-        return False, False
-
-    cross_up = bool(fast.iloc[-2] <= slow.iloc[-2] and fast.iloc[-1] > slow.iloc[-1])
-    cross_down = bool(fast.iloc[-2] >= slow.iloc[-2] and fast.iloc[-1] < slow.iloc[-1])
-    return cross_up, cross_down
-
-
-def compute_live_stop(
-    bars: pd.DataFrame,
-    entry_price: float,
-    side: str,
-    variant: Variant,
-) -> float | None:
-    """
-    ライブボット用: 現在の ATR からストップ価格を計算して返す。
-    atr_stop_mult が 0 なら None を返す。
-    """
-    if variant.atr_stop_mult <= 0:
-        return None
-    x = bars.iloc[:-1].copy().reset_index(drop=True)
-    if x.empty or "atr" not in x.columns:
-        from ..trading.indicators import atr as calc_atr
-
-        x["atr"] = calc_atr(x)
-    cur_atr = float(x["atr"].iloc[-1]) if pd.notna(x["atr"].iloc[-1]) else 0.0
-    if cur_atr <= 0:
-        return None
-    return (
-        entry_price - variant.atr_stop_mult * cur_atr
-        if side == "long"
-        else entry_price + variant.atr_stop_mult * cur_atr
-    )
 
 
 def run(
@@ -237,26 +191,18 @@ def run(
                 cooldown_remaining = v.cooldown_bars
                 continue
 
-        cross_up = _cross_up(cur, prev)
-        cross_down = _cross_down(cur, prev)
-
-        # ブレイクアウトエントリーモードのシグナル
-        if v.breakout_entry:
-            breakout_up = bool(
-                pd.notna(cur.get("don_high")) and float(cur["high"]) > float(cur["don_high"])
-            )
-            breakout_down = bool(
-                pd.notna(cur.get("don_low")) and float(cur["low"]) < float(cur["don_low"])
-            )
-        else:
-            breakout_up = False
-            breakout_down = False
+        # エグジット判定は常に MA クロス、エントリーはバリアントのモードに従う
+        exit_cross_up = cross_up(cur, prev)
+        exit_cross_down = cross_down(cur, prev)
+        entry_long_sig, entry_short_sig = entry_signals(cur, prev, v)
 
         # クロスによるエグジット（train 期間でも決済はする）— 利確トレーリング中は除外
         if (
             pos is not None
             and not pos.tp_hit
-            and ((pos.side == "long" and cross_down) or (pos.side == "short" and cross_up))
+            and (
+                (pos.side == "long" and exit_cross_down) or (pos.side == "short" and exit_cross_up)
+            )
         ):
             exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
             cash = _close(
@@ -266,14 +212,10 @@ def run(
 
         # エントリー（test 期間のみ、クールダウン中はスキップ）
         if pos is None and i >= trade_start_idx and cooldown_remaining == 0:
-            # エントリーシグナル: ブレイクアウトモードならブレイクアウト、通常はMAクロス
-            entry_long = breakout_up if v.breakout_entry else cross_up
-            entry_short = breakout_down if v.breakout_entry else cross_down
-
             # 統計フィルター用の close 履歴
             close_hist = x["close"].iloc[: i + 1]
 
-            if entry_long and _long_ok(cur, v, close_hist):
+            if entry_long_sig and long_ok(cur, v, close_hist):
                 raw_px = float(nxt["open"])
                 px = _apply_slippage(raw_px, "long", "entry", slippage_pct)
 
@@ -296,13 +238,8 @@ def run(
                     (px + v.tp_atr_mult * cur_atr) if v.tp_atr_mult > 0 and cur_atr > 0 else None
                 )
 
-                # サイジング: Kelly or GARCH
-                if v.use_kelly_sizing:
-                    sizing_frac = kelly_fraction(close_hist)
-                else:
-                    sizing_frac = _garch_fraction(close_hist, v, garch_cache)
-
-                btc = _size(cash, px, stop_px, fees.rate, v, sizing_frac)
+                sizing_frac = sizing_fraction(close_hist, v, garch_cache)
+                btc = position_size(cash, px, stop_px, fees.rate, v, sizing_frac)
                 cash -= btc * px * (1.0 + fees.rate)
                 fees.record_fill(pd.Timestamp(nxt["dt"]), btc * px)
                 pos = _Position(
@@ -316,7 +253,7 @@ def run(
                     tp_px=tp_px,
                 )
 
-            elif entry_short and v.enable_short and _short_ok(cur, v):
+            elif entry_short_sig and v.enable_short and short_ok(cur, v):
                 raw_px = float(nxt["open"])
                 px = _apply_slippage(raw_px, "short", "entry", slippage_pct)
                 if st_line is not None and not np.isnan(st_line[i]):
@@ -328,8 +265,8 @@ def run(
                 tp_px = (
                     (px - v.tp_atr_mult * cur_atr) if v.tp_atr_mult > 0 and cur_atr > 0 else None
                 )
-                garch_frac = _garch_fraction(x["close"].iloc[: i + 1], v, garch_cache)
-                btc = _size(cash, px, stop_px, fees.rate, v, garch_frac)
+                sizing_frac = sizing_fraction(close_hist, v, garch_cache)
+                btc = position_size(cash, px, stop_px, fees.rate, v, sizing_frac)
                 cash -= btc * px * fees.rate  # ショート: 証拠金は別途管理、手数料のみ控除
                 fees.record_fill(pd.Timestamp(nxt["dt"]), btc * px)
                 pos = _Position(
@@ -363,7 +300,7 @@ def _close(
     trades: list[dict],
     pos: _Position,
     exit_px: float,
-    exit_dt: object,
+    exit_dt: pd.Timestamp,
     fees: FeeTierModel,
     cash: float,
     strat_name: str,
@@ -405,59 +342,6 @@ def _close(
     return cash
 
 
-def _cross_up(cur: pd.Series, prev: pd.Series) -> bool:
-    if pd.isna(cur["ma_fast"]) or pd.isna(prev["ma_fast"]):
-        return False
-    return prev["ma_fast"] <= prev["ma_slow"] and cur["ma_fast"] > cur["ma_slow"]
-
-
-def _cross_down(cur: pd.Series, prev: pd.Series) -> bool:
-    if pd.isna(cur["ma_fast"]) or pd.isna(prev["ma_fast"]):
-        return False
-    return prev["ma_fast"] >= prev["ma_slow"] and cur["ma_fast"] < cur["ma_slow"]
-
-
-def _long_ok(cur: pd.Series, v: Variant, close_hist: pd.Series | None = None) -> bool:
-    if v.use_ma200_filter and int(cur.get("regime_up", 0)) != 1:
-        return False
-    if v.use_hmm_regime and close_hist is not None:
-        regime = hmm_regime(close_hist)
-        if regime != 2:  # bull only
-            return False
-    if v.rsi_min is not None and (pd.isna(cur.get("rsi")) or float(cur["rsi"]) < v.rsi_min):
-        return False
-    if (
-        v.atr_high_avoid
-        and pd.notna(cur.get("atr_pct"))
-        and pd.notna(cur.get("atrpct_q75"))
-        and float(cur["atr_pct"]) > float(cur["atrpct_q75"])
-    ):
-        return False
-    if v.require_don_break and int(cur.get("don_break_up", 0)) != 1:
-        return False
-    if v.adx_min is not None and (pd.isna(cur.get("adx")) or float(cur["adx"]) < v.adx_min):
-        return False
-    # Hurst exponent filter
-    if v.hurst_min > 0 and close_hist is not None:
-        h = hurst_exponent(close_hist)
-        if h < v.hurst_min:
-            return False
-    # Breakout z-score filter
-    if v.zscore_min > 0 and close_hist is not None:
-        z = breakout_zscore(close_hist)
-        if z < v.zscore_min:
-            return False
-    return True
-
-
-def _short_ok(cur: pd.Series, v: Variant) -> bool:
-    if int(cur.get("regime_up", 1)) != 0:
-        return False
-    return not (
-        v.adx_min is not None and (pd.isna(cur.get("adx")) or float(cur["adx"]) < v.adx_min)
-    )
-
-
 def _apply_slippage(px: float, side: str, action: str, slippage_pct: float) -> float:
     """成行約定価格にスリッページを適用する。
     不利方向: ロングエントリー/ショートエグジット → 高め、逆 → 安め。
@@ -466,35 +350,3 @@ def _apply_slippage(px: float, side: str, action: str, slippage_pct: float) -> f
         return px
     unfavorable = (side == "long" and action == "entry") or (side == "short" and action == "exit")
     return px * (1.0 + slippage_pct) if unfavorable else px * (1.0 - slippage_pct)
-
-
-def _garch_fraction(
-    close: pd.Series,
-    v: Variant,
-    cache: dict[tuple[int, float], float],
-) -> float:
-    if v.garch_target_vol <= 0:
-        return 1.0
-    from ..trading.garch_sizing import garch_position_fraction
-
-    key = (len(close), v.garch_target_vol)
-    if key not in cache:
-        cache[key] = garch_position_fraction(close, target_vol=v.garch_target_vol)
-    return cache[key]
-
-
-def _size(
-    cash: float,
-    px: float,
-    stop_px: float | None,
-    fee_rate: float,
-    v: Variant,
-    garch_frac: float = 1.0,
-) -> float:
-    max_btc = cash * garch_frac / (px * (1.0 + fee_rate))
-    if v.risk_pct > 0 and stop_px is not None and px > 0:
-        stop_width = abs(px - stop_px)
-        if stop_width > 0:
-            btc = (cash * garch_frac * v.risk_pct / 100.0) / stop_width
-            return min(btc, max_btc)
-    return max_btc

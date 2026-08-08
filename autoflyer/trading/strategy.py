@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -382,3 +383,28 @@ VARIANTS: list[Variant] = [
         hurst_min=0.55,
     ),
 ]
+
+# `variants` コマンドの表示列: (見出し, 幅, 値の取り出し方)
+_TABLE_COLUMNS: list[tuple[str, int, Callable[[Variant], str]]] = [
+    ("ma200", 5, lambda v: "✓" if v.use_ma200_filter else " "),
+    ("stop", 5, lambda v: str(v.atr_stop_mult or "-")),
+    ("tp", 4, lambda v: str(v.tp_atr_mult or "-")),
+    ("trail", 5, lambda v: str(v.tp_trail_mult or "-")),
+    ("brk", 3, lambda v: "✓" if v.breakout_entry else " "),
+    ("st", 4, lambda v: str(v.supertrend_mult or "-")),
+    ("garch", 5, lambda v: str(v.garch_target_vol or "-")),
+    ("risk%", 6, lambda v: str(v.risk_pct or "-")),
+]
+_NAME_WIDTH = 40
+
+
+def format_variants_table(variants: list[Variant] = VARIANTS) -> str:
+    """`variants` コマンド用の一覧テーブルを組み立てる。"""
+    header = f"{'Name':<{_NAME_WIDTH}} " + " ".join(
+        f"{title:^{width}}" for title, width, _ in _TABLE_COLUMNS
+    )
+    lines = [header, "-" * len(header)]
+    for v in variants:
+        cells = " ".join(f"{get(v):^{width}}" for _, width, get in _TABLE_COLUMNS)
+        lines.append(f"{v.name:<{_NAME_WIDTH}} {cells}")
+    return "\n".join(lines)

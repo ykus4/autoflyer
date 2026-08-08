@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable, Mapping
+
 import pandas as pd
 
-_OHLCV_DTYPE: dict[str, str] = {
-    "open": "float64",
-    "high": "float64",
-    "low": "float64",
-    "close": "float64",
-    "volume": "float64",
+from ..timeframes import to_pandas_rule
+
+_OHLCV_DTYPE: Mapping[Hashable, type[complex]] = {
+    "open": float,
+    "high": float,
+    "low": float,
+    "close": float,
+    "volume": float,
 }
 
 
@@ -24,20 +28,10 @@ def load_csv(path: str) -> pd.DataFrame:
 
 
 def resample(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    rule = _to_pandas_rule(timeframe)
     return (
         df.set_index("dt")
-        .resample(rule)
+        .resample(to_pandas_rule(timeframe))
         .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
         .dropna()
         .reset_index()
     )
-
-
-def _to_pandas_rule(tf: str) -> str:
-    tf = tf.upper().strip()
-    if tf.endswith("H"):
-        return f"{tf[:-1]}h"
-    if tf in ("1D", "D"):
-        return "1D"
-    raise ValueError(f"Unsupported timeframe: {tf}")

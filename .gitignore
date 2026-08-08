@@ -7,6 +7,11 @@ __pycache__/
 dist/
 build/
 
+# ツールのキャッシュ
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
 # 環境変数・秘密情報
 .env
 

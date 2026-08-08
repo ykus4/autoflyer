@@ -19,6 +19,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from .indicators import log_returns
+
 log = logging.getLogger("autoflyer.garch")
 
 _GARCH_LOOKBACK = 252  # ~1 year of daily bars for estimation
@@ -33,7 +35,7 @@ def garch_vol_forecast(
     Falls back to rolling std if GARCH does not converge.
     """
     series = close.iloc[-lookback:] if len(close) >= lookback else close
-    log_ret = np.log(series / series.shift(1)).dropna().values * 100  # percent returns
+    log_ret = log_returns(series) * 100  # percent returns
 
     if len(log_ret) < 30:
         return float(np.std(log_ret) * np.sqrt(252) / 100) or 1.0
@@ -43,12 +45,12 @@ def garch_vol_forecast(
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            res = arch_model(log_ret, vol="Garch", p=1, q=1, dist="normal").fit(
+            res = arch_model(log_ret, vol="GARCH", p=1, q=1, dist="normal").fit(
                 disp="off", show_warning=False
             )
         # one-step forecast variance (in percent^2)
         fc = res.forecast(horizon=1, reindex=False)
-        var_pct2 = float(fc.variance.iloc[-1, 0])
+        var_pct2 = float(fc.variance.to_numpy()[-1, 0])
         # annualise and convert back to fraction
         return float(np.sqrt(var_pct2 * 252) / 100)
     except Exception as e:

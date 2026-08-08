@@ -231,7 +231,7 @@ python -m autoflyer bot --live \
 | `--amount` | `0` | 1取引あたりの上限（JPY、`0`=残高全額） |
 | `--interval` | `60` | ポーリング間隔（秒） |
 | `--max-dd-pct` | `20.0` | サーキットブレーカー発動閾値（%） |
-| `--state` | `state.json` | ポジション状態ファイルのパス |
+| `--state` | `var/state.json` | ポジション状態ファイルのパス |
 | `--log-file` | なし | ログファイルのパス |
 
 </details>
@@ -250,7 +250,7 @@ python -m autoflyer dashboard \
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `--state` | `state.json` | ポジション状態ファイルのパス |
+| `--state` | `var/state.json` | ポジション状態ファイルのパス |
 | `--log-file` | なし | ログファイルのパス |
 | `--port` | `8080` | リッスンするポート番号 |
 

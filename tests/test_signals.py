@@ -7,7 +7,10 @@ from autoflyer.trading.signals import (
     breakout_signals,
     cross_down,
     cross_up,
+    exit_reason,
+    exit_signals,
     long_ok,
+    momentum,
     position_size,
     short_ok,
 )
@@ -29,6 +32,10 @@ def _bar(**overrides) -> pd.Series:
         "don_high": 105.0,
         "don_low": 95.0,
         "don_break_up": 1,
+        "don_exit_high": 105.0,
+        "don_exit_low": 98.0,
+        "bb_width": 0.05,
+        "bb_width_q25": 0.10,
     }
     return pd.Series({**base, **overrides})
 
@@ -66,6 +73,47 @@ class TestBreakoutSignals:
         assert breakout_signals(_bar(don_high=float("nan"), don_low=float("nan"))) == (False, False)
 
 
+class TestExitSignals:
+    def test_defaults_to_ma_cross(self):
+        prev = _bar(ma_fast=101.0, ma_slow=100.0)
+        cur = _bar(ma_fast=99.0, ma_slow=100.0)
+        assert exit_signals(cur, prev, Variant("V")) == (True, False)
+        assert exit_reason(Variant("V")) == "ma_cross"
+
+    def test_donchian_exit_uses_short_channel(self):
+        v = Variant("V", donchian_exit_term=10)
+        # 10バー安値 (98) を割ったら決済、割らなければ継続
+        assert exit_signals(_bar(low=97.0), _bar(), v)[0] is True
+        assert exit_signals(_bar(low=99.0), _bar(), v)[0] is False
+        assert exit_reason(v) == "don_exit"
+
+    def test_donchian_exit_ignores_ma_cross(self):
+        v = Variant("V", donchian_exit_term=10)
+        prev = _bar(ma_fast=101.0, ma_slow=100.0)
+        cur = _bar(ma_fast=99.0, ma_slow=100.0, low=99.0)  # MAデッドクロスだが安値は割っていない
+        assert exit_signals(cur, prev, v)[0] is False
+
+    def test_term_20_uses_entry_channel(self):
+        v = Variant("V", donchian_exit_term=20)
+        assert exit_signals(_bar(low=94.0), _bar(), v)[0] is True  # don_low=95
+        assert exit_signals(_bar(low=96.0), _bar(), v)[0] is False
+
+    def test_invalid_term_is_rejected(self):
+        with pytest.raises(ValueError, match="donchian_exit_term"):
+            Variant("V", donchian_exit_term=7)
+
+
+class TestMomentum:
+    def test_positive_and_negative(self):
+        rising = pd.Series([100.0, 110.0, 120.0, 130.0])
+        assert momentum(rising, 2) == pytest.approx(130 / 110 - 1)
+        falling = pd.Series([130.0, 120.0, 110.0, 100.0])
+        assert momentum(falling, 2) < 0
+
+    def test_insufficient_history_returns_none(self):
+        assert momentum(pd.Series([100.0, 110.0]), 5) is None
+
+
 class TestLongOk:
     def test_passes_with_no_filters(self):
         assert long_ok(_bar(), Variant("V")) is True
@@ -99,6 +147,22 @@ class TestLongOk:
     def test_zscore_filter_blocks_weak_breakout(self):
         flat = pd.Series([100.0] * 50 + [100.5])
         assert long_ok(_bar(), Variant("V", zscore_min=2.0), flat) is False
+
+    def test_tsmom_blocks_when_price_is_below_lookback(self):
+        v = Variant("V", mom_lookback=3)
+        falling = pd.Series([130.0, 120.0, 110.0, 100.0])
+        rising = pd.Series([100.0, 110.0, 120.0, 130.0])
+        assert long_ok(_bar(), v, falling) is False
+        assert long_ok(_bar(), v, rising) is True
+
+    def test_bb_squeeze_requires_narrow_bands(self):
+        v = Variant("V", bb_squeeze=True)
+        assert long_ok(_bar(bb_width=0.05, bb_width_q25=0.10), v) is True
+        assert long_ok(_bar(bb_width=0.20, bb_width_q25=0.10), v) is False
+
+    def test_bb_squeeze_blocks_when_width_unknown(self):
+        v = Variant("V", bb_squeeze=True)
+        assert long_ok(_bar(bb_width=float("nan"), bb_width_q25=0.10), v) is False
 
 
 class TestShortOk:

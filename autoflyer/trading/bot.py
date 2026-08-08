@@ -23,7 +23,7 @@ from ..notifications import EmailNotifier, create_notifier
 from .client import BitFlyerClient
 from .fees import FeeTierModel
 from .indicators import add_indicators
-from .signals import breakout_signals, compute_signal, live_stop, long_ok, position_size
+from .signals import entry_signals, exit_signals, live_stop, long_ok, position_size
 from .signals import sizing_fraction as compute_sizing_fraction
 from .state import FLAT_STATE, append_equity, load_state, save_state
 from .strategy import VARIANTS, Variant
@@ -167,11 +167,17 @@ class LiveBot:
 
     # ---- サイクルの各段階 ----
 
-    def _entry_signals(self, bars: pd.DataFrame, bars_ind: pd.DataFrame) -> tuple[bool, bool]:
-        """(signal_up, signal_down)。ブレイクアウトモードは最新確定バーで判定する。"""
-        if self.cfg.variant.breakout_entry:
-            return breakout_signals(bars_ind.iloc[-2])
-        return compute_signal(bars)
+    def _signals(self, bars_ind: pd.DataFrame) -> tuple[bool, bool]:
+        """(entry_long, exit_long)。最新確定バー (-2) とその 1 本前で判定する。
+
+        バックテストと同じ `signals` の関数を使うことで、エントリー方式
+        （MA クロス / ブレイクアウト）と決済方式（MA クロス / ドンチャン）が
+        両エンジンで必ず一致する。
+        """
+        confirmed, prev = bars_ind.iloc[-2], bars_ind.iloc[-3]
+        entry_long, _ = entry_signals(confirmed, prev, self.cfg.variant)
+        exit_long, _ = exit_signals(confirmed, prev, self.cfg.variant)
+        return entry_long, exit_long
 
     def _check_circuit_breaker(self, cur_equity: float, cur_price: float) -> bool:
         """ドローダウンが閾値に達したらポジションを閉じて True を返す（＝停止）。"""
@@ -278,7 +284,7 @@ class LiveBot:
         bars = self.client.fetch_ohlcv(self.cfg.product_code, self.cfg.timeframe)
         bars_ind = add_indicators(bars)
         self.fees.step(pd.Timestamp(bars["dt"].iloc[-2]))
-        signal_up, signal_down = self._entry_signals(bars, bars_ind)
+        entry_long, exit_long = self._signals(bars_ind)
 
         cur_price = self._current_price(bars)
         entry_price = float(self.state["entry_price"] or cur_price)
@@ -314,17 +320,17 @@ class LiveBot:
             self.cooldown_remaining -= 1
 
         log.info(
-            "signal_up=%s  signal_down=%s  in_pos=%s  dd=%.1f%%  cooldown=%d",
-            signal_up,
-            signal_down,
+            "entry_long=%s  exit_long=%s  in_pos=%s  dd=%.1f%%  cooldown=%d",
+            entry_long,
+            exit_long,
             self.state["in_pos"],
             self.last_dd_pct,
             self.cooldown_remaining,
         )
 
-        if signal_up and not self.state["in_pos"] and self.cooldown_remaining <= 0:
+        if entry_long and not self.state["in_pos"] and self.cooldown_remaining <= 0:
             self._try_enter(bars, bars_ind, cur_price)
-        elif signal_down and self.state["in_pos"]:
+        elif exit_long and self.state["in_pos"]:
             self._close_position(
                 bars,
                 cur_price,

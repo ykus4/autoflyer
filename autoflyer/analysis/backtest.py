@@ -19,9 +19,9 @@ from ..config import (
 from ..trading.fees import FeeTierModel
 from ..trading.indicators import add_indicators, supertrend
 from ..trading.signals import (
-    cross_down,
-    cross_up,
     entry_signals,
+    exit_reason,
+    exit_signals,
     long_ok,
     position_size,
     short_ok,
@@ -191,22 +191,19 @@ def run(
                 cooldown_remaining = v.cooldown_bars
                 continue
 
-        # エグジット判定は常に MA クロス、エントリーはバリアントのモードに従う
-        exit_cross_up = cross_up(cur, prev)
-        exit_cross_down = cross_down(cur, prev)
+        # エントリー / エグジットともバリアントのモードに従う
         entry_long_sig, entry_short_sig = entry_signals(cur, prev, v)
+        exit_long_sig, exit_short_sig = exit_signals(cur, prev, v)
 
-        # クロスによるエグジット（train 期間でも決済はする）— 利確トレーリング中は除外
+        # シグナルによるエグジット（train 期間でも決済はする）— 利確トレーリング中は除外
         if (
             pos is not None
             and not pos.tp_hit
-            and (
-                (pos.side == "long" and exit_cross_down) or (pos.side == "short" and exit_cross_up)
-            )
+            and ((pos.side == "long" and exit_long_sig) or (pos.side == "short" and exit_short_sig))
         ):
             exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
             cash = _close(
-                trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, "ma_cross"
+                trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, exit_reason(v)
             )
             pos = None
 

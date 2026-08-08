@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from ..config import MA_FAST, MA_SLOW
+from ..config import DON_EXIT_TERM, DON_TERM, MA_FAST, MA_SLOW
 from .garch_sizing import garch_position_fraction
 from .indicators import atr as compute_atr
 from .stats_filters import breakout_zscore, hmm_regime, hurst_exponent, kelly_fraction
@@ -81,6 +81,42 @@ def entry_signals(cur: pd.Series, prev: pd.Series, v: Variant) -> tuple[bool, bo
     return cross_up(cur, prev), cross_down(cur, prev)
 
 
+# エグジット用チャネルの列名（term -> (安値列, 高値列)）
+_EXIT_CHANNEL: dict[int, tuple[str, str]] = {
+    DON_EXIT_TERM: ("don_exit_low", "don_exit_high"),
+    DON_TERM: ("don_low", "don_high"),
+}
+
+
+def exit_signals(cur: pd.Series, prev: pd.Series, v: Variant) -> tuple[bool, bool]:
+    """(exit_long, exit_short)。
+
+    タートル式（`donchian_exit_term` 指定時）は逆方向チャネル割れで決済し、
+    既定では MA クロスで決済する。
+    """
+    if v.donchian_exit_term > 0:
+        low_col, high_col = _EXIT_CHANNEL[v.donchian_exit_term]
+        exit_long = bool(pd.notna(cur.get(low_col)) and float(cur["low"]) < float(cur[low_col]))
+        exit_short = bool(pd.notna(cur.get(high_col)) and float(cur["high"]) > float(cur[high_col]))
+        return exit_long, exit_short
+    return cross_down(cur, prev), cross_up(cur, prev)
+
+
+def exit_reason(v: Variant) -> str:
+    """シグナル決済の記録用ラベル。"""
+    return "don_exit" if v.donchian_exit_term > 0 else "ma_cross"
+
+
+def momentum(close_hist: pd.Series, lookback: int) -> float | None:
+    """N バー前からの騰落率。履歴が足りなければ None。"""
+    if len(close_hist) <= lookback:
+        return None
+    past = float(close_hist.iloc[-1 - lookback])
+    if past <= 0:
+        return None
+    return float(close_hist.iloc[-1]) / past - 1.0
+
+
 # =========================
 # エントリーフィルター
 # =========================
@@ -99,6 +135,16 @@ def long_ok(
     if v.use_ma200_filter and int(cur.get("regime_up", 0)) != 1:
         on_reject("MA200 regime_up=0")
         return False
+    if v.mom_lookback > 0 and close_hist is not None:
+        mom = momentum(close_hist, v.mom_lookback)
+        if mom is None or mom <= 0:
+            on_reject(f"TSMOM({v.mom_lookback}) = {mom} <= 0")
+            return False
+    if v.bb_squeeze:
+        width, q25 = cur.get("bb_width"), cur.get("bb_width_q25")
+        if pd.isna(width) or pd.isna(q25) or float(width) > float(q25):
+            on_reject("no Bollinger squeeze (band width above 25th pct)")
+            return False
     if v.use_hmm_regime and close_hist is not None and hmm_regime(close_hist) != 2:
         on_reject("HMM regime is not bull")
         return False

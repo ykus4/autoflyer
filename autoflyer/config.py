@@ -23,6 +23,14 @@ MACD_SLOW = 26
 MACD_SIGNAL = 9
 DON_TERM = 20
 
+# --- ドンチャン・エグジット（タートル式: 短い逆方向チャネル割れで決済）---
+DON_EXIT_TERM = 10
+
+# --- ボリンジャーバンド（スクイーズ・ブレイクアウト）---
+BB_LEN = 20
+BB_STD = 2.0
+BB_WIDTH_Q_LOOKBACK = 200
+
 # --- Supertrend（トレンド追従トレーリングストップ）---
 SUPERTREND_ATR_LEN = 10
 

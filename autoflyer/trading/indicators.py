@@ -9,6 +9,10 @@ from ..config import (
     ADX_LEN,
     ATR_LEN,
     ATR_Q_LOOKBACK,
+    BB_LEN,
+    BB_STD,
+    BB_WIDTH_Q_LOOKBACK,
+    DON_EXIT_TERM,
     DON_TERM,
     MA_FAST,
     MA_SLOW,
@@ -157,5 +161,17 @@ def add_indicators(bars: pd.DataFrame) -> pd.DataFrame:
     x["don_high"] = x["high"].rolling(DON_TERM).max().shift(1)
     x["don_low"] = x["low"].rolling(DON_TERM).min().shift(1)
     x["don_break_up"] = (pd.notna(x["don_high"]) & (x["high"] > x["don_high"])).astype("int64")
+
+    # タートル式エグジット用の短いチャネル
+    x["don_exit_high"] = x["high"].rolling(DON_EXIT_TERM).max().shift(1)
+    x["don_exit_low"] = x["low"].rolling(DON_EXIT_TERM).min().shift(1)
+
+    # ボリンジャーバンド幅とその低位分位（スクイーズ判定用）
+    bb_mid = x["close"].rolling(BB_LEN).mean()
+    bb_sd = x["close"].rolling(BB_LEN).std(ddof=0)
+    x["bb_width"] = (2 * BB_STD * bb_sd / bb_mid).replace(
+        [float("inf"), -float("inf")], float("nan")
+    )
+    x["bb_width_q25"] = x["bb_width"].rolling(BB_WIDTH_Q_LOOKBACK).quantile(0.25)
 
     return x

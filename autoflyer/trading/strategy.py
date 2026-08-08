@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..config import DON_EXIT_TERM, DON_TERM
+
 
 @dataclass(frozen=True)
 class Variant:
@@ -63,6 +65,27 @@ class Variant:
     # Supertrend トレーリングストップ: Supertrend ラインをストップに使う（0 = 無効）。
     # atr_stop_mult / chandelier_mult より優先。一般的な既定は 3.0。
     supertrend_mult: float = 0.0
+
+    # --- タートル式ドンチャン・エグジット ---
+    # 決済を MA クロスではなく N バー逆方向チャネル割れで行う（0 = 無効、MA クロス）。
+    # 指定できるのは 10（DON_EXIT_TERM）と 20（DON_TERM）のみ。
+    donchian_exit_term: int = 0
+
+    # --- 時系列モメンタム (TSMOM) フィルター ---
+    # N バー前と比べて価格が上昇しているときのみエントリー（0 = 無効）。
+    # MA200 とは別種のレジーム判定として使える。
+    mom_lookback: int = 0
+
+    # --- ボリンジャー・スクイーズ ---
+    # バンド幅が過去の低位 25% にあるとき（＝ボラ収縮後）のみエントリー。
+    bb_squeeze: bool = False
+
+    def __post_init__(self) -> None:
+        if self.donchian_exit_term not in (0, DON_EXIT_TERM, DON_TERM):
+            raise ValueError(
+                f"donchian_exit_term must be 0, {DON_EXIT_TERM} or {DON_TERM}, "
+                f"got {self.donchian_exit_term}"
+            )
 
 
 VARIANTS: list[Variant] = [
@@ -381,6 +404,107 @@ VARIANTS: list[Variant] = [
         supertrend_mult=3.0,
         garch_target_vol=0.40,
         hurst_min=0.55,
+    ),
+    # === タートル式: エントリーもエグジットもドンチャンチャネルで完結 ===
+    # 決済が MA クロス（遅行指標）ではなく 10 バー安値割れになるのが本質的な差。
+    Variant(
+        "TURTLE_PURE_EXIT10_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        donchian_exit_term=10,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "TURTLE_EXIT10_STOP2_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        donchian_exit_term=10,
+        atr_stop_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "TURTLE_EXIT10_STOP1.0_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        donchian_exit_term=10,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.40,
+    ),
+    # グリッドサーチで最も窓間のブレが小さかった組み合わせ（平均順位 4.75）
+    Variant(
+        "TURTLE_EXIT10_STOP1.5_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        donchian_exit_term=10,
+        atr_stop_mult=1.5,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "TURTLE_EXIT20_STOP1.0_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        donchian_exit_term=20,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.40,
+    ),
+    # 純タートル（MA200 フィルターなし = 原典に近い形）
+    Variant(
+        "TURTLE_NOFILTER_EXIT10_STOP2_GARCH40",
+        breakout_entry=True,
+        donchian_exit_term=10,
+        atr_stop_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    # === 時系列モメンタム (TSMOM): MA200 の代わりに N バー騰落率でレジーム判定 ===
+    Variant(
+        "MOM90_BREAKOUT_STOP1.0_GARCH40",
+        breakout_entry=True,
+        mom_lookback=90,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "MOM180_BREAKOUT_STOP1.0_GARCH40",
+        breakout_entry=True,
+        mom_lookback=180,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.40,
+    ),
+    # MA200 と TSMOM の併用（二重のレジーム確認）
+    Variant(
+        "MOM90_MA200_BREAKOUT_STOP1.0_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        mom_lookback=90,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.40,
+    ),
+    # TSMOM + タートル決済
+    Variant(
+        "MOM90_TURTLE_EXIT10_GARCH40",
+        breakout_entry=True,
+        mom_lookback=90,
+        donchian_exit_term=10,
+        atr_stop_mult=2.0,
+        garch_target_vol=0.40,
+    ),
+    # === ボリンジャー・スクイーズ: ボラ収縮後の放れを狙う ===
+    Variant(
+        "BBSQUEEZE_BREAKOUT_STOP1.0_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        bb_squeeze=True,
+        atr_stop_mult=1.0,
+        garch_target_vol=0.40,
+    ),
+    Variant(
+        "BBSQUEEZE_TURTLE_EXIT10_GARCH40",
+        breakout_entry=True,
+        use_ma200_filter=True,
+        bb_squeeze=True,
+        donchian_exit_term=10,
+        atr_stop_mult=2.0,
+        garch_target_vol=0.40,
     ),
 ]
 

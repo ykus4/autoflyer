@@ -158,6 +158,10 @@ python -m autoflyer fetch-binance --end 2026-05-07 --output var/btc_usdt_1d.csv
 
 </details>
 
+> **価格データについて**: bitFlyer にはローソク足 API がないため、ライブ Bot は Binance の `BTCJPY` 足を使う
+> （bitFlyer の現在値に合わせて拡大縮小）。ライブと同じ系列でバックテストするなら
+> `fetch-binance --symbol BTCJPY`（2024-03 以降のみ）、長期検証は `BTCUSDT` を使う。
+
 <details>
 <summary><b>update</b> — 差分更新（毎日自動実行）</summary>
 
@@ -198,6 +202,38 @@ python -m autoflyer backtest --csv var/btc_usdt_1d.csv --timeframe 1D --out-trad
 | `--variant` | 全バリアント | 検証するバリアント名（複数指定可） |
 | `--train-end` | なし | ウォークフォワード分割日（これ以降がテスト期間） |
 | `--out-trades` | なし | トレード結果のCSV出力先 |
+| `--costs` | `spot` | `spot`=現物の手数料ティア / `cfd`=Crypto CFD（手数料 0、建玉に日次 0.04% + ファンディング） |
+| `--slippage` | `0` | 成行約定のスリッページ率（例: `0.0002`）。CFD のスプレッドの目安 |
+
+結果には総リターン・CAGR・最大ドローダウン・シャープ・ソルティノ・カルマーの表が付く。
+
+</details>
+
+<details>
+<summary><b>grid</b> — パラメータのグリッドサーチ</summary>
+
+```bash
+python -m autoflyer grid --csv var/btc_usdt_1d.csv --timeframe 1D \
+  --base BREAKOUT_STOP1.0_GARCH40 \
+  --param atr_stop_mult=0.8,1.0,1.5 --param garch_target_vol=0.3,0.4,0.5 \
+  --costs cfd --metric calmar
+```
+
+`--param` には `Variant` の任意のフィールドを `field=v1,v2,...` で指定（複数可）。全組み合わせを評価し `--metric` 順に表示する。
+
+</details>
+
+<details>
+<summary><b>walk-forward</b> — ウォークフォワード検証</summary>
+
+```bash
+python -m autoflyer walk-forward --csv var/btc_usdt_1d.csv --timeframe 1D \
+  --base BREAKOUT_STOP1.0_GARCH40 --param atr_stop_mult=0.8,1.0,1.5 \
+  --train-days 730 --test-days 180 --costs cfd
+```
+
+各ウィンドウで学習期間（`--train-days`）に最も良かった組み合わせを選び、直後のテスト期間（`--test-days`）で評価する。
+テスト期間を複利でつないだ成績が**アウトオブサンプル**の実力値になる。
 
 </details>
 

@@ -310,11 +310,16 @@ python -m autoflyer dashboard \
 
 `DASHBOARD_USER` / `DASHBOARD_PASS` を `.env` に設定すると Basic 認証付きで外部公開される。未設定時は `localhost` のみ。
 
+表示内容: ポジション（LONG/SHORT・ストップ・含み損益）、現在価格と残高（CFD は証拠金・維持率）、資産推移、
+**価格チャートと売買ポイント**（`var/trades.jsonl`）、**取引履歴**、**最新のバックテスト結果**
+（`backtest` が保存する `var/backtest/latest.json`）、停止中の警告、ログ。
+
 | オプション | デフォルト | 説明 |
 |---|---|---|
 | `--state` | `var/state.json` | ポジション状態ファイルのパス |
 | `--log-file` | なし | ログファイルのパス |
 | `--port` | `8080` | リッスンするポート番号 |
+| `--backtest-report` | `var/backtest/latest.json` | 表示するバックテスト結果 |
 
 </details>
 
@@ -371,25 +376,35 @@ python -m autoflyer variants
 
 ---
 
-## メール通知
+## 通知（メール / Slack / LINE）
 
-エラーや重要イベント発生時にメールで通知します。`.env` に SMTP 設定を追加するだけで有効化：
+`.env` に設定したチャネルすべてに通知します（未設定のチャネルは無効）：
 
 ```env
+# メール
 SMTP_HOST=smtp.mail.me.com
 SMTP_PORT=587
 SMTP_USER=your_email@icloud.com
 SMTP_PASS=<App用パスワード>
 NOTIFY_TO=your_email@icloud.com
+
+# Slack（Incoming Webhook）
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+
+# LINE（Messaging API。LINE Notify は 2025 年に終了）
+LINE_CHANNEL_TOKEN=<チャネルアクセストークン>
+LINE_TO=<送信先ユーザー ID>
+
+# 日次サマリーの時刻（JST の時。-1 で無効）
+DAILY_SUMMARY_HOUR=9
 ```
 
 **通知されるイベント:**
-- サーキットブレーカー発動（ドローダウン閾値超過）
-- エントリー / エグジット / ストップロス到達
-- HTTP / ネットワークエラー（リトライ後も失敗）
-- 予期しないエラー
-
-未設定の場合は通知なしで動作します（ログのみ）。
+- 日次サマリー（資産と前回比・ドローダウン・ポジション・直近 24 時間の約定・稼働状態）
+- エントリー / エグジット / ストップロス到達（取引所の逆指値の約定を含む）
+- サーキットブレーカー発動・要確認の停止（建玉の不一致など）
+- 逆指値の発注失敗・決済注文の失敗
+- HTTP / ネットワークエラー、予期しないエラー
 
 ---
 
@@ -400,7 +415,7 @@ autoflyer/
 ├── autoflyer/
 │   ├── __main__.py          CLI エントリポイント（薄い parse + dispatch）
 │   ├── config.py            アルゴリズム定数（MA期間・ATR長など全環境共通）
-│   ├── notifications.py     メール通知（SMTP）
+│   ├── notifications.py     通知（メール / Slack / LINE）
 │   ├── dashboard.py         監視ダッシュボード API（FastAPI）
 │   ├── trading/             ライブ取引関連
 │   │   ├── bot.py           ライブ取引ループ（照合・逆指値・サーキットブレーカー）

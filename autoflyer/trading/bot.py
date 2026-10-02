@@ -52,6 +52,7 @@ from .exits import (
 )
 from .fees import FeeTierModel
 from .indicators import add_indicators, supertrend
+from .market_data import rescale
 from .signals import entry_signals, exit_reason, exit_signals, long_ok, position_size, short_ok
 from .signals import sizing_fraction as compute_sizing_fraction
 from .state import FLAT_STATE, append_equity, equity_path, load_state, save_state
@@ -776,12 +777,16 @@ class LiveBot:
             return False
 
         bars = self.client.fetch_ohlcv(self.cfg.product_code, self.cfg.timeframe)
+        cur_price = self._current_price(bars)
+        if not self.cfg.dry_run:
+            # Binance の足を bitFlyer の価格水準に合わせる（ストップ価格を取引所と揃える）
+            bars, ratio = rescale(bars, cur_price)
+            log.debug("price basis ratio (bitFlyer / Binance): %.4f", ratio)
         ind = add_indicators(bars)
         confirmed, prev = ind.iloc[-2], ind.iloc[-3]
         bar_dt = pd.Timestamp(confirmed["dt"]).isoformat()
         self.fees.step(pd.Timestamp(confirmed["dt"]))
 
-        cur_price = self._current_price(bars)
         self._last_price = cur_price
         self._close_blocked = False
         if not self._started:

@@ -203,6 +203,7 @@ def _advance(ex: FakeExchange, close: float | None = None) -> None:
         "volume": 1.0,
     }
     ex.bars = pd.concat([ex.bars, pd.DataFrame([row])], ignore_index=True)
+    ex.ltp = c
 
 
 def _config(tmp_path, variant: Variant, **overrides) -> BotConfig:

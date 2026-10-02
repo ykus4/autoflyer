@@ -19,7 +19,9 @@ import argparse
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -27,7 +29,7 @@ import requests
 from dotenv import load_dotenv
 
 from ..logging_utils import setup_logging
-from ..notifications import EmailNotifier, create_notifier
+from ..notifications import Notifier, create_notifier
 from .broker import (
     STOP_FILLED,
     STOP_GONE,
@@ -61,12 +63,15 @@ from .state import (
     append_trade,
     equity_path,
     load_state,
+    read_jsonl_tail,
     save_state,
     trades_path,
 )
 from .strategy import Variant, get_variant
 
 log = logging.getLogger("autoflyer.bot")
+
+_JST = timezone(timedelta(hours=9))
 
 # 上位足トレンド確認に使う時間足の対応表
 _MTF_UP: dict[str, str] = {
@@ -104,6 +109,7 @@ class BotConfig:
     max_dd_pct: float
     use_mtf: bool
     exchange_stop: bool = True  # 取引所に逆指値を置く（ライブのみ）
+    summary_hour_jst: int = 9  # 日次サマリーを送る時刻（JST、負なら送らない）
 
     def __post_init__(self) -> None:
         if self.variant.enable_short and not self.product_code.startswith("FX_"):
@@ -142,7 +148,7 @@ class LiveBot:
         self,
         cfg: BotConfig,
         client: BitFlyerClient,
-        notifier: EmailNotifier,
+        notifier: Notifier,
         broker: Broker | None = None,
     ) -> None:
         self.cfg = cfg
@@ -163,6 +169,7 @@ class LiveBot:
         self._close_blocked = False  # このサイクルで決済に失敗した（同じサイクルで再発注しない）
         self._unconfirmed_polls = 0
         self._last_price = 0.0
+        self._now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
         log.info("Loaded state: %s", self.state)
 
     # ---- 状態ヘルパー ----
@@ -716,6 +723,63 @@ class LiveBot:
         )
         self._sync_exchange_stop(cur_price, bar_dt)
 
+    # ---- 日次サマリー ----
+
+    def _maybe_send_daily_summary(self, equity: float | None, cur_price: float) -> None:
+        """1 日 1 回、指定時刻（JST）を過ぎた最初のサイクルでサマリーを送る。"""
+        hour = self.cfg.summary_hour_jst
+        if hour < 0:
+            return
+        now_jst = self._now().astimezone(_JST)
+        today = now_jst.date().isoformat()
+        if now_jst.hour < hour or self.state.get("last_summary_date") == today:
+            return
+        self.notifier.send(f"日次サマリー {today}", self._daily_summary_body(equity, cur_price))
+        self.state.update(last_summary_date=today, last_summary_equity=equity)
+        self._save()
+
+    def _daily_summary_body(self, equity: float | None, cur_price: float) -> str:
+        lines = []
+        prev = self.state.get("last_summary_equity")
+        if equity is None:
+            lines.append("資産: 取得失敗")
+        elif prev:
+            diff = equity - prev
+            lines.append(f"資産: {equity:,.0f} 円（前回比 {diff:+,.0f} 円 / {diff / prev:+.2%}）")
+        else:
+            lines.append(f"資産: {equity:,.0f} 円")
+        peak = self.state.get("peak_cash")
+        if peak:
+            lines.append(f"ピーク: {peak:,.0f} 円 / ドローダウン: {self.last_dd_pct:.1f}%")
+
+        if self.in_pos:
+            entry = float(self.state["entry_price"])
+            pnl = unrealized_pnl(self.side, self.btc, entry, cur_price)
+            lines.append(
+                f"ポジション: {self.side} {self.btc:.6f} BTC @ {entry:,.0f}"
+                f"（含み損益 {pnl:+,.0f} 円）/ ストップ {self.state['stop_px'] or '—'}"
+            )
+        else:
+            lines.append("ポジション: なし")
+
+        since = self._now() - timedelta(days=1)
+        recent = [
+            t
+            for t in read_jsonl_tail(self.cfg.trades_file, 50)
+            if datetime.fromisoformat(t["dt"]) >= since
+        ]
+        lines.append(f"直近 24 時間の約定: {len(recent)} 件")
+        for t in recent:
+            pnl_txt = f" 損益 {t['pnl']:+,.0f}" if t.get("pnl") is not None else ""
+            lines.append(
+                f"  - {t['action']} {t['side']} {t['btc']:.6f} @ {t['price'] or 0:,.0f}"
+                f" ({t['reason']}){pnl_txt}"
+            )
+        status = "停止中: " + str(self.state["halt_reason"]) if self.state["halted"] else "稼働中"
+        mode = "ドライラン" if self.cfg.dry_run else "本番"
+        lines.append(f"状態: {status}（{mode} / {self.cfg.variant.name} / {self.cfg.timeframe}）")
+        return "\n".join(lines)
+
     # ---- サイクルの各段階 ----
 
     def _check_circuit_breaker(self, cur_equity: float, cur_price: float, bar_dt: str) -> bool:
@@ -841,6 +905,7 @@ class LiveBot:
             append_equity(self.cfg.equity_file, cur_equity)
             if self._check_circuit_breaker(cur_equity, cur_price, bar_dt):
                 return False
+        self._maybe_send_daily_summary(cur_equity, cur_price)
 
         if bar_dt != self.state["last_bar_dt"]:
             self._on_new_bar(ind, bar_dt, cur_price)
@@ -944,6 +1009,7 @@ def _config_from_args(args: argparse.Namespace) -> BotConfig:
         max_dd_pct=args.max_dd_pct,
         use_mtf=args.use_mtf,
         exchange_stop=not args.no_exchange_stop,
+        summary_hour_jst=int(os.environ.get("DAILY_SUMMARY_HOUR", "9")),
     )
 
 

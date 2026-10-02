@@ -39,6 +39,8 @@ STATE_DEFAULT: dict[str, Any] = {
     "no_entry_bar_dt": None,  # このバーでは新規エントリーしない（同一バーでの再エントリー防止）
     "cooldown_remaining": 0,  # 損切り後の残りクールダウン（バー数）
     "pending_entry": None,  # 発注済みで約定を記録する前のエントリー方向（クラッシュ復元用）
+    "last_summary_date": None,  # 日次サマリーを送った日（JST）
+    "last_summary_equity": None,
     "halted": False,  # サーキットブレーカー発動中・要確認で停止中
     "halt_reason": None,
 }

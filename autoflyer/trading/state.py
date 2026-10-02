@@ -51,6 +51,33 @@ def equity_path(state_file: Path) -> Path:
     return state_file.with_name("equity.jsonl")
 
 
+def trades_path(state_file: Path) -> Path:
+    """約定履歴（エントリー/決済）は state.json と同じディレクトリに置く。"""
+    return state_file.with_name("trades.jsonl")
+
+
+def append_trade(trades_file: Path, record: dict[str, Any]) -> None:
+    """約定 1 件を JSONL に追記する（ダッシュボードの取引履歴・チャートの売買点に使う）。"""
+    row = {"dt": datetime.now(timezone.utc).isoformat(), **record}
+    with trades_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, default=str) + "\n")
+
+
+def read_jsonl_tail(path: Path, n: int) -> list[dict[str, Any]]:
+    """JSONL の末尾 n 行を読む。壊れた行は飛ばす。"""
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines()[-n:]:
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
 def load_state(state_file: Path) -> dict[str, Any]:
     """state.json を読み込む。壊れていればバックアップして初期状態に戻す。"""
     if not state_file.exists():

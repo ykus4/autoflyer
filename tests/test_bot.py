@@ -781,3 +781,18 @@ class TestReviewRound3:
         assert [o[0] for o in ex.orders] == ["buy"]  # 1 回目は待つ
         bot.step()
         assert [o[0] for o in ex.orders] == ["buy", "sell"]  # 猶予後に再試行
+
+
+class TestTradeLog:
+    def test_entry_and_exit_are_logged(self, tmp_path):
+        from autoflyer.trading.state import read_jsonl_tail
+
+        bot = _bot(
+            tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False, exchange_stop=False
+        )
+        bot.step()
+        bot.client.ltp = float(bot.state["stop_px"]) * 0.99
+        bot.step()
+        rows = read_jsonl_tail(bot.cfg.trades_file, 10)
+        assert [(r["action"], r["reason"]) for r in rows] == [("entry", "signal"), ("exit", "stop")]
+        assert rows[1]["pnl"] < 0 and rows[0]["side"] == "long"

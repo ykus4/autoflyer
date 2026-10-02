@@ -55,7 +55,15 @@ from .indicators import add_indicators, supertrend
 from .market_data import rescale
 from .signals import entry_signals, exit_reason, exit_signals, long_ok, position_size, short_ok
 from .signals import sizing_fraction as compute_sizing_fraction
-from .state import FLAT_STATE, append_equity, equity_path, load_state, save_state
+from .state import (
+    FLAT_STATE,
+    append_equity,
+    append_trade,
+    equity_path,
+    load_state,
+    save_state,
+    trades_path,
+)
 from .strategy import Variant, get_variant
 
 log = logging.getLogger("autoflyer.bot")
@@ -110,6 +118,10 @@ class BotConfig:
     @property
     def equity_file(self) -> Path:
         return equity_path(self.state_file)
+
+    @property
+    def trades_file(self) -> Path:
+        return trades_path(self.state_file)
 
     @property
     def fallback_jpy(self) -> float:
@@ -346,6 +358,7 @@ class LiveBot:
             px = float(self.state["stop_order_px"] or self.state["stop_px"] or 0.0)
             pnl = unrealized_pnl(self.side, self.btc, float(self.state["entry_price"]), px)
             log.warning("EXCHANGE STOP  %.8f BTC @ ~%.0f JPY  pnl≈%.0f", self.btc, px, pnl)
+            self._log_trade("exit", px, "exchange_stop", pnl)
             self.notifier.send(
                 "STOP HIT（取引所逆指値）— ポジション決済",
                 f"取引所の逆指値が約定しました。\n数量: {self.btc:.8f} BTC @ ~{px:,.0f} JPY\n"
@@ -353,6 +366,7 @@ class LiveBot:
             )
         else:
             log.critical("建玉が取引所から消えています（手動決済・ロスカット?）— state をクリア")
+            self._log_trade("exit", None, "external", None)
             self.notifier.send(
                 "建玉の不一致",
                 "Bot が管理していた建玉が取引所に見つかりません。"
@@ -392,6 +406,7 @@ class LiveBot:
             reason = self.state["pending_exit"] or "exit"
             if ex.side is None:
                 log.warning("結果不明だった決済注文 [%s] は約定していた", reason)
+                self._log_trade("exit", None, reason, None)
                 self.notifier.send(
                     f"EXIT [{reason}] — 決済を確認", "結果不明だった決済注文の約定を確認しました。"
                 )
@@ -481,6 +496,7 @@ class LiveBot:
             pending_entry=None,
         )
         self._save()
+        self._log_trade("entry", ex.avg_price, "restored", None)
         log.critical(
             "記録漏れのエントリーを取引所から復元: %s %.8f BTC @ %.0f (stop=%s)",
             ex.side,
@@ -549,6 +565,20 @@ class LiveBot:
     def _stop_reason(self) -> str:
         return "trail_stop" if self.state["tp_hit"] else "stop"
 
+    def _log_trade(self, action: str, price: float | None, reason: str, pnl: float | None) -> None:
+        append_trade(
+            self.cfg.trades_file,
+            {
+                "action": action,  # "entry" / "exit"
+                "side": self.side,
+                "btc": self.btc,
+                "price": price,
+                "reason": reason,
+                "pnl": pnl,
+                "dry_run": self.cfg.dry_run,
+            },
+        )
+
     def _go_flat(self, reason: str, bar_dt: str) -> None:
         self.state.update(FLAT_STATE)
         if reason in _STOP_REASONS:
@@ -604,6 +634,7 @@ class LiveBot:
         self.fees.record_fill(pd.Timestamp.now(tz="UTC"), fill.size * fill.price)
         pnl = unrealized_pnl(side, btc, float(self.state["entry_price"]), fill.price)
         log.info("EXIT[%s]  %s %.8f BTC @ %.0f JPY  pnl≈%.0f", reason, side, btc, fill.price, pnl)
+        self._log_trade("exit", fill.price, reason, pnl)
         self.notifier.send(
             f"EXIT [{reason}] — ポジション決済",
             f"{side} ポジションを決済しました（理由: {reason}）。\n"
@@ -668,6 +699,7 @@ class LiveBot:
             pending_entry=None,
         )
         self._save()
+        self._log_trade("entry", fill.price, "signal", None)
         log.info(
             "ENTRY  %s %.8f BTC @ %.0f JPY  stop_px=%s  tp_px=%s",
             side,

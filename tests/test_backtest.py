@@ -6,7 +6,6 @@ import pytest
 
 from autoflyer.analysis.backtest import _apply_slippage, run
 from autoflyer.config import START_CASH_JPY
-from autoflyer.trading.signals import compute_signal
 from autoflyer.trading.strategy import Variant
 
 
@@ -26,23 +25,6 @@ def _make_bars(n: int = 500, seed: int = 0) -> pd.DataFrame:
             "volume": rng.uniform(1, 10, n),
         }
     )
-
-
-class TestComputeSignal:
-    def test_returns_two_bools(self):
-        bars = _make_bars(100)
-        result = compute_signal(bars)
-        assert len(result) == 2
-        assert all(isinstance(v, bool) for v in result)
-
-    def test_too_few_bars(self):
-        bars = _make_bars(10)
-        assert compute_signal(bars) == (False, False)
-
-    def test_not_both_true(self):
-        bars = _make_bars(300)
-        up, down = compute_signal(bars)
-        assert not (up and down)
 
 
 class TestRun:

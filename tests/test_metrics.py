@@ -29,7 +29,9 @@ def test_sharpe_sign_and_calmar():
     rng = np.random.default_rng(0)
     eq = pd.Series(100 * np.cumprod(1 + rng.normal(0.002, 0.01, 730)))
     m = equity_metrics(eq, "1D")
-    assert m["sharpe"] > 0 and m["sortino"] > m["sharpe"] * 0.5
+    assert m["sharpe"] > 0
+    # 対称な分布なら下方偏差は標準偏差の約 1/√2 → ソルティノはシャープより大きい
+    assert m["sharpe"] < m["sortino"] < m["sharpe"] * 2
     assert m["calmar"] == pytest.approx(m["cagr_pct"] / m["max_dd_pct"])
 
 

@@ -47,8 +47,8 @@ def equity_metrics(equity: pd.Series, tf: str) -> dict[str, float]:
     rets = eq.pct_change().dropna()
     std = float(rets.std(ddof=1))
     sharpe = float(rets.mean() / std * math.sqrt(per_year)) if std > 0 else float("nan")
-    downside = rets[rets < 0]
-    dstd = float(np.sqrt((downside**2).mean())) if len(downside) else 0.0
+    # 下方偏差は全リターンで平均する（利益側は 0 とみなす）
+    dstd = float(np.sqrt((rets.clip(upper=0) ** 2).mean()))
     sortino = float(rets.mean() / dstd * math.sqrt(per_year)) if dstd > 0 else float("nan")
 
     mdd = max_drawdown_pct(eq)

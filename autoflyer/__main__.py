@@ -8,6 +8,7 @@ Commands
   update         既存 CSV を今日まで差分更新
   backtest       CSV データを使ってバックテストを実行
   bot            BitFlyer FX ライブ取引ボットを起動
+  reset-halt     サーキットブレーカーによる停止を解除
   dashboard      ボット監視ダッシュボードを起動
   variants       利用可能なバリアント一覧を表示
 
@@ -58,6 +59,17 @@ def _cmd_bot(args: argparse.Namespace) -> None:
     run(args)
 
 
+def _cmd_reset_halt(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .trading.state import reset_halt
+
+    if reset_halt(Path(args.state)):
+        print("停止状態を解除しました。Bot を再起動してください。")
+    else:
+        print("停止状態ではありません。")
+
+
 def _cmd_dashboard(args: argparse.Namespace) -> None:
     import os
     from pathlib import Path
@@ -100,6 +112,7 @@ _COMMANDS = {
     "update": _cmd_update,
     "backtest": _cmd_backtest,
     "bot": _cmd_bot,
+    "reset-halt": _cmd_reset_halt,
     "variants": _cmd_variants,
     "dashboard": _cmd_dashboard,
 }
@@ -135,8 +148,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-trades", metavar="PATH")
 
     p = sub.add_parser("bot", help="ライブ取引ボットを起動")
-    p.add_argument("--live", action="store_true")
-    p.add_argument("--symbol", default="FX_BTC_JPY")
+    p.add_argument("--live", action="store_true", help="実発注する（DRY_RUN=0 も必要）")
+    p.add_argument("--symbol", help="取引ペア（既定: 環境変数 SYMBOL または FX_BTC_JPY）")
     p.add_argument("--timeframe", nargs=1, metavar="TF")
     p.add_argument("--variant", metavar="NAME")
     p.add_argument("--amount", type=float, default=0)
@@ -145,6 +158,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-file", metavar="PATH")
     p.add_argument("--max-dd-pct", type=float, default=20.0, metavar="PCT")
     p.add_argument("--use-mtf", action="store_true")
+    p.add_argument(
+        "--no-exchange-stop",
+        action="store_true",
+        help="取引所に逆指値を置かず、Bot のポーリングだけでストップを監視する",
+    )
+
+    p = sub.add_parser("reset-halt", help="サーキットブレーカーによる停止を解除する")
+    p.add_argument("--state", default=DEFAULT_STATE)
 
     p = sub.add_parser("dashboard", help="ボット監視ダッシュボードを起動")
     p.add_argument("--state", default=DEFAULT_STATE)

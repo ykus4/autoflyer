@@ -161,3 +161,18 @@ class TestCooldown:
         trades_cd, _ = run(bars, start_cash=START_CASH_JPY, tf_label="1D", variant=v_cd)
         # クールダウンがあるとトレード数が減るか同等
         assert len(trades_cd) <= len(trades_no_cd)
+
+
+class TestCfdCosts:
+    def test_holding_cost_reduces_pnl(self):
+        bars = _make_bars(600, seed=3)
+        v = Variant("BASE")
+        spot, _ = run(bars, start_cash=START_CASH_JPY, tf_label="1D", variant=v)
+        cfd, _ = run(bars, start_cash=START_CASH_JPY, tf_label="1D", variant=v, costs="cfd")
+        assert len(spot) == len(cfd) > 0
+        assert (cfd["holding_jpy"] > 0).all()  # ロングは毎日コストを払う
+        assert (spot["holding_jpy"] == 0).all()
+        # 手数料 0 でも保有コストは fee_jpy に含まれ、純損益から差し引かれる
+        row = cfd.iloc[0]
+        assert row["net_pnl_jpy"] == pytest.approx(row["gross_pnl_jpy"] - row["fee_jpy"])
+        assert row["fee_jpy"] == pytest.approx(row["holding_jpy"])

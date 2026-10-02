@@ -1,11 +1,22 @@
-"""BitFlyer fee tier model based on 30-day rolling trading volume."""
+"""Trading cost models.
+
+- `FeeTierModel` — bitFlyer spot: per-trade fee tier from 30-day rolling volume.
+- `CfdCostModel` — bitFlyer Crypto CFD (FX_BTC_JPY): no trading fee, daily
+  holding cost (leverage fee ± funding) on the open position.
+
+Both expose `rate` (per-trade fee), `step()`, `record_fill()` and
+`holding_rate(side)` so the backtester and the bot can swap them.
+"""
 
 from __future__ import annotations
 
 import bisect
 from collections import deque
+from typing import Protocol
 
 import pandas as pd
+
+from ..config import CFD_FUNDING_DAILY, CFD_LEVERAGE_FEE_DAILY
 
 # 上限ボリューム一覧（bisect で O(log N) 検索するために分離）
 _TIER_UPPER: list[float] = [
@@ -68,8 +79,61 @@ class FeeTierModel:
         self._vol_30d += notional_jpy
         self._prune(dt)
 
+    def holding_rate(self, side: str) -> float:
+        """現物は保有コストなし。"""
+        return 0.0
+
     def _prune(self, now: pd.Timestamp) -> None:
         cutoff = now - pd.Timedelta(days=30)
         while self._queue and self._queue[0][0] < cutoff:
             _, v = self._queue.popleft()
             self._vol_30d -= v
+
+
+class CostModel(Protocol):
+    rate: float
+
+    def step(self, dt: pd.Timestamp) -> None: ...
+    def record_fill(self, dt: pd.Timestamp, notional_jpy: float) -> None: ...
+    def holding_rate(self, side: str) -> float: ...
+
+
+class CfdCostModel:
+    """Crypto CFD: 取引手数料 0、建玉金額に対する日次の保有コスト。"""
+
+    def __init__(
+        self,
+        leverage_fee_daily: float = CFD_LEVERAGE_FEE_DAILY,
+        funding_daily: float = CFD_FUNDING_DAILY,
+    ) -> None:
+        self.rate = 0.0
+        self.leverage_fee_daily = leverage_fee_daily
+        self.funding_daily = funding_daily
+
+    def step(self, dt: pd.Timestamp) -> None:
+        pass
+
+    def record_fill(self, dt: pd.Timestamp, notional_jpy: float) -> None:
+        pass
+
+    def holding_rate(self, side: str) -> float:
+        """建玉金額に対する 1 日あたりのコスト率（負なら受け取り）。"""
+        funding = self.funding_daily if side == "long" else -self.funding_daily
+        return self.leverage_fee_daily + funding
+
+
+COST_MODELS = ("spot", "cfd")
+
+
+def make_cost_model(kind: str) -> CostModel:
+    """`"spot"` / `"cfd"` からコストモデルを作る。"""
+    if kind == "spot":
+        return FeeTierModel()
+    if kind == "cfd":
+        return CfdCostModel()
+    raise ValueError(f"Unknown cost model: {kind} (choose from {', '.join(COST_MODELS)})")
+
+
+def cost_model_for_product(product_code: str) -> CostModel:
+    """bitFlyer の product_code に合うコストモデル（FX_* は CFD）。"""
+    return make_cost_model("cfd" if product_code.startswith("FX_") else "spot")

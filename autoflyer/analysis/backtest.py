@@ -20,8 +20,9 @@ from ..config import (
     MACD_SLOW,
     REGIME_MA_LEN,
 )
+from ..timeframes import to_minutes
 from ..trading.exits import ExitState, initial_stop, initial_tp, manage_position
-from ..trading.fees import FeeTierModel
+from ..trading.fees import CostModel, make_cost_model
 from ..trading.indicators import add_indicators, supertrend
 from ..trading.signals import (
     entry_signals,
@@ -42,6 +43,7 @@ class _Position(ExitState):
     btc: float
     entry_dt: pd.Timestamp
     entry_fee_rate: float
+    holding_cost: float = 0.0  # 保有中に支払った CFD の日次コスト累計
 
     def equity(self, cash: float, price: float) -> float:
         if self.is_long:
@@ -57,7 +59,7 @@ class _Book:
     strategy: str
     timeframe: str
     slippage_pct: float
-    fees: FeeTierModel = field(default_factory=FeeTierModel)
+    fees: CostModel = field(default_factory=lambda: make_cost_model("spot"))
     trades: list[dict] = field(default_factory=list)
 
     def open(
@@ -92,6 +94,12 @@ class _Book:
             pos.trail_best = pos.favorable(signal_bar)
         return pos
 
+    def accrue_holding(self, pos: _Position, price: float, bar_days: float) -> None:
+        """1 バー分の保有コストを現金から差し引く（スポットでは 0）。"""
+        cost = pos.btc * price * self.fees.holding_rate(pos.side) * bar_days
+        pos.holding_cost += cost
+        self.cash -= cost
+
     def close(self, pos: _Position, raw_px: float, exit_dt: pd.Timestamp, reason: str) -> None:
         """次足始値で成行決済し、約定履歴に 1 行追加する。"""
         exit_px = _apply_slippage(raw_px, pos.side, "exit", self.slippage_pct)
@@ -99,7 +107,7 @@ class _Book:
         fee_exit = notional_exit * self.fees.rate
         self.fees.record_fill(pd.Timestamp(exit_dt), notional_exit)
 
-        total_fee = pos.btc * pos.entry_price * pos.entry_fee_rate + fee_exit
+        total_fee = pos.btc * pos.entry_price * pos.entry_fee_rate + fee_exit + pos.holding_cost
         if pos.is_long:
             gross = (exit_px - pos.entry_price) * pos.btc
             self.cash += notional_exit - fee_exit
@@ -121,6 +129,7 @@ class _Book:
                 "btc": pos.btc,
                 "gross_pnl_jpy": gross,
                 "fee_jpy": total_fee,
+                "holding_jpy": pos.holding_cost,
                 "net_pnl_jpy": net,
                 "cash_after": self.cash,
                 "win": int(net > 0),
@@ -137,6 +146,7 @@ def run(
     train_end: pd.Timestamp | None = None,
     slippage_pct: float = 0.0,
     bars_with_ind: pd.DataFrame | None = None,
+    costs: str = "spot",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Returns (trades_df, equity_df).
@@ -145,6 +155,7 @@ def run(
     slippage_pct: 成行約定価格に対するスリッページ率（例: 0.001 = 0.1%）。
     bars_with_ind: 事前計算済みの add_indicators() 結果。複数バリアントで共有することで
                    同じ時間足内での重複計算を避けられる。None の場合は内部で計算する。
+    costs: "spot"（現物の手数料ティア）または "cfd"（手数料 0 + 建玉の日次コスト）。
 
     バー i の終値でシグナルを判定し、約定はすべてバー i+1 の始値で行う。
     """
@@ -169,7 +180,9 @@ def run(
         strategy=f"{v.name}/{tf_label}",
         timeframe=tf_label,
         slippage_pct=slippage_pct,
+        fees=make_cost_model(costs),
     )
+    bar_days = to_minutes(tf_label) / 1440
     pos: _Position | None = None
     cooldown_remaining = 0
     garch_cache: dict[tuple[int, float], float] = {}
@@ -202,8 +215,9 @@ def run(
             }
         )
 
-        # ストップ / 利確の管理
+        # ストップ / 利確の管理（このバーを持ち越した分の保有コストを先に計上）
         if pos is not None:
+            book.accrue_holding(pos, cur_close, bar_days)
             reason = manage_position(pos, cur, v, cur_atr, st_val)
             if reason is not None:
                 book.close(pos, next_open, nxt["dt"], reason)

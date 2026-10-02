@@ -50,7 +50,7 @@ from .exits import (
     stop_hit,
     tp_reached,
 )
-from .fees import FeeTierModel
+from .fees import cost_model_for_product
 from .indicators import add_indicators, supertrend
 from .market_data import rescale
 from .signals import entry_signals, exit_reason, exit_signals, long_ok, position_size, short_ok
@@ -141,7 +141,7 @@ class LiveBot:
             if cfg.dry_run
             else LiveBroker(client, cfg.product_code, cfg.fallback_jpy)
         )
-        self.fees = FeeTierModel()
+        self.fees = cost_model_for_product(cfg.product_code)
         cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state = load_state(cfg.state_file)
         self.last_dd_pct = 0.0

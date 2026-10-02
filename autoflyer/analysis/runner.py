@@ -16,11 +16,14 @@ def run_backtest(
     variant_names: list[str] | None = None,
     train_end: str | None = None,
     out_trades: str | None = None,
+    costs: str = "spot",
+    slippage_pct: float = 0.0,
 ) -> None:
     tfs = timeframes or TIMEFRAMES
     variants = select_variants(variant_names)
     split = pd.Timestamp(train_end, tz="UTC") if train_end else None
 
+    print(f"Costs: {costs}  slippage: {slippage_pct:.4%}")
     if split is not None:
         print(f"Walk-forward: train <= {split.date()}  |  test > {split.date()}")
 
@@ -44,6 +47,8 @@ def run_backtest(
                 variant=v,
                 train_end=split,
                 bars_with_ind=bars_with_ind,
+                costs=costs,
+                slippage_pct=slippage_pct,
             )
             if trades.empty:
                 print(f"  [{v.name}/{tf}]  no trades")

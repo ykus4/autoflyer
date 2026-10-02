@@ -50,6 +50,8 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         variant_names=args.variant,
         train_end=args.train_end,
         out_trades=args.out_trades,
+        costs=args.costs,
+        slippage_pct=args.slippage,
     )
 
 
@@ -146,6 +148,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--variant", nargs="+", metavar="NAME")
     p.add_argument("--train-end", metavar="DATE")
     p.add_argument("--out-trades", metavar="PATH")
+    p.add_argument(
+        "--costs",
+        choices=["spot", "cfd"],
+        default="spot",
+        help="spot=現物の手数料ティア / cfd=Crypto CFD（手数料 0 + 建玉の日次コスト）",
+    )
+    p.add_argument(
+        "--slippage",
+        type=float,
+        default=0.0,
+        metavar="PCT",
+        help="成行約定のスリッページ率（例: 0.0002 = 0.02%%。CFD のスプレッド半分の目安）",
+    )
 
     p = sub.add_parser("bot", help="ライブ取引ボットを起動")
     p.add_argument("--live", action="store_true", help="実発注する（DRY_RUN=0 も必要）")

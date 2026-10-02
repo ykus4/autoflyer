@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/autoflyer
-ExecStart=/opt/autoflyer/.venv/bin/python -m autoflyer bot --live --timeframe ${TIMEFRAME} --variant ${VARIANT} --amount ${TRADE_AMOUNT_JPY} --interval ${POLL_INTERVAL_SEC} --state var/state.json --log-file var/bot.log --max-dd-pct 30
+# --live は DRY_RUN=0 のときだけ有効（bot 側の安全装置）。サーキットブレーカー停止時は exit 0 で再起動しない
+ExecStart=/opt/autoflyer/.venv/bin/python -m autoflyer bot --live --symbol ${SYMBOL} --timeframe ${TIMEFRAME} --variant ${VARIANT} --amount ${TRADE_AMOUNT_JPY} --interval ${POLL_INTERVAL_SEC} --state var/state.json --log-file var/bot.log --max-dd-pct 30
 EnvironmentFile=/opt/autoflyer/.env
 Environment=PYTHONUNBUFFERED=1
 Restart=on-failure

@@ -17,9 +17,13 @@ start() {
     exit 1
   fi
 
-  echo "→ ボットを起動します..."
+  echo "→ ボットを起動します (DRY_RUN=${DRY_RUN:-1})..."
+  # 実発注は DRY_RUN=0 のときだけ（bot 側でも --live と DRY_RUN=0 の両方を要求する）
+  LIVE_FLAG=""
+  [ "${DRY_RUN:-1}" = "0" ] && LIVE_FLAG="--live"
   uv run python -m autoflyer bot \
-    --live \
+    $LIVE_FLAG \
+    --symbol "${SYMBOL:-FX_BTC_JPY}" \
     --timeframe "${TIMEFRAME:-1D}" \
     --variant "${VARIANT:-MA200_STOP1.5ATR_GARCH40}" \
     --amount "${TRADE_AMOUNT_JPY:-0}" \

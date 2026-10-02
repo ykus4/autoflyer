@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, TypeVar
+from urllib.parse import urlencode
 
 import pandas as pd
 import requests
@@ -55,6 +56,21 @@ def retry_request(func: Callable[[], T]) -> T:
 def free_amount(balance: dict[str, dict[str, float]], currency: str) -> float:
     """`fetch_balance()` の結果から利用可能額を取り出す。通貨がなければ 0。"""
     return float(balance.get(currency, {}).get("free", 0))
+
+
+def net_position(positions: list[dict[str, Any]]) -> tuple[str | None, float, float]:
+    """建玉一覧を (side, 合計数量, 平均建値) に集約する。side は "long"/"short"/None。
+
+    bitFlyer は建玉を約定ごとに分けて返すため、同方向の建玉を数量加重で平均する。
+    """
+    signed = sum(float(p["size"]) * (1 if p["side"] == "BUY" else -1) for p in positions)
+    if abs(signed) < 1e-9:
+        return None, 0.0, 0.0
+    side = "BUY" if signed > 0 else "SELL"
+    same = [p for p in positions if p["side"] == side]
+    total = sum(float(p["size"]) for p in same)
+    avg = sum(float(p["price"]) * float(p["size"]) for p in same) / total
+    return ("long" if signed > 0 else "short"), abs(signed), avg
 
 
 def coingecko_days(tf: str, limit: int) -> int:
@@ -138,6 +154,7 @@ class BitFlyerClient:
     # ---- Private endpoints ----
 
     def _auth_headers(self, method: str, path: str, body: str = "") -> dict:
+        """`path` はクエリ文字列込みで署名する（bitFlyer の仕様）。"""
         ts = str(int(datetime.now(timezone.utc).timestamp()))
         sign = hmac.new(
             self._secret.encode(), (ts + method + path + body).encode(), hashlib.sha256
@@ -149,40 +166,101 @@ class BitFlyerClient:
             "Content-Type": "application/json",
         }
 
-    def fetch_balance(self) -> dict[str, dict[str, float]]:
-        """通貨コード -> {"free": 利用可能額, "total": 総額}。"""
+    def _private_get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        full_path = f"{path}?{urlencode(params)}" if params else path
 
-        def _do() -> list[dict[str, Any]]:
-            path = "/v1/me/getbalance"
+        def _do() -> Any:
             resp = self._session.get(
-                f"{_BF_BASE}{path}", headers=self._auth_headers("GET", path), timeout=10
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-        return {
-            item["currency_code"]: {"free": item["available"], "total": item["amount"]}
-            for item in retry_request(_do)
-        }
-
-    def create_order(self, product_code: str, side: str, size: float) -> dict:
-        def _do() -> dict:
-            path = "/v1/me/sendchildorder"
-            body = json.dumps(
-                {
-                    "product_code": product_code,
-                    "child_order_type": "MARKET",
-                    "side": side.upper(),
-                    "size": size,
-                }
-            )
-            resp = self._session.post(
-                f"{_BF_BASE}{path}",
-                headers=self._auth_headers("POST", path, body),
-                data=body,
+                f"{_BF_BASE}{full_path}",
+                headers=self._auth_headers("GET", full_path),
                 timeout=10,
             )
             resp.raise_for_status()
             return resp.json()
 
         return retry_request(_do)
+
+    def _private_post(self, path: str, payload: dict[str, Any]) -> Any:
+        """POST は冪等でない（注文が二重に出うる）ため自動リトライしない。"""
+        body = json.dumps(payload)
+        resp = self._session.post(
+            f"{_BF_BASE}{path}",
+            headers=self._auth_headers("POST", path, body),
+            data=body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+    def fetch_balance(self) -> dict[str, dict[str, float]]:
+        """現物口座の残高。通貨コード -> {"free": 利用可能額, "total": 総額}。"""
+        return {
+            item["currency_code"]: {"free": item["available"], "total": item["amount"]}
+            for item in self._private_get("/v1/me/getbalance")
+        }
+
+    def fetch_collateral(self) -> dict[str, float]:
+        """証拠金口座（Crypto CFD / FX）の状態。
+
+        主なキー: collateral（預入証拠金）, open_position_pnl（評価損益）,
+        require_collateral（必要証拠金）, keep_rate（証拠金維持率）。
+        """
+        return self._private_get("/v1/me/getcollateral")
+
+    def fetch_positions(self, product_code: str) -> list[dict[str, Any]]:
+        """建玉一覧（Crypto CFD / FX のみ）。各要素は side/price/size などを持つ。"""
+        return self._private_get("/v1/me/getpositions", {"product_code": product_code})
+
+    def fetch_child_order(self, product_code: str, acceptance_id: str) -> dict[str, Any] | None:
+        """受付 ID から注文の約定状況を取得する。まだ反映されていなければ None。"""
+        orders = self._private_get(
+            "/v1/me/getchildorders",
+            {"product_code": product_code, "child_order_acceptance_id": acceptance_id},
+        )
+        return orders[0] if orders else None
+
+    def fetch_active_parent_orders(self, product_code: str) -> list[dict[str, Any]]:
+        """有効な特殊注文（逆指値など）の一覧。"""
+        return self._private_get(
+            "/v1/me/getparentorders",
+            {"product_code": product_code, "parent_order_state": "ACTIVE"},
+        )
+
+    def create_order(self, product_code: str, side: str, size: float) -> dict:
+        """成行注文を出す。戻り値は {"child_order_acceptance_id": ...}。"""
+        return self._private_post(
+            "/v1/me/sendchildorder",
+            {
+                "product_code": product_code,
+                "child_order_type": "MARKET",
+                "side": side.upper(),
+                "size": size,
+            },
+        )
+
+    def create_stop_order(
+        self, product_code: str, side: str, size: float, trigger_price: float
+    ) -> str:
+        """逆指値（STOP）の特殊注文を出し、parent_order_acceptance_id を返す。"""
+        resp = self._private_post(
+            "/v1/me/sendparentorder",
+            {
+                "order_method": "SIMPLE",
+                "parameters": [
+                    {
+                        "product_code": product_code,
+                        "condition_type": "STOP",
+                        "side": side.upper(),
+                        "size": size,
+                        "trigger_price": int(round(trigger_price)),
+                    }
+                ],
+            },
+        )
+        return str(resp["parent_order_acceptance_id"])
+
+    def cancel_parent_order(self, product_code: str, acceptance_id: str) -> None:
+        self._private_post(
+            "/v1/me/cancelparentorder",
+            {"product_code": product_code, "parent_order_acceptance_id": acceptance_id},
+        )

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("autoflyer.bot")
+log = logging.getLogger("autoflyer.state")
 
 STATE_DEFAULT: dict[str, Any] = {
     "in_pos": False,
@@ -33,6 +33,11 @@ FLAT_STATE: dict[str, Any] = {
 }
 
 _EQUITY_MAX_BYTES = 5 * 1024 * 1024  # 5MB per file
+
+
+def equity_path(state_file: Path) -> Path:
+    """資産推移ログは state.json と同じディレクトリに置く。"""
+    return state_file.with_name("equity.jsonl")
 
 
 def load_state(state_file: Path) -> dict[str, Any]:

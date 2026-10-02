@@ -20,6 +20,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from .trading.client import BitFlyerClient
+from .trading.state import equity_path
 
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -42,7 +43,7 @@ class DashboardSettings:
 
     @property
     def equity_file(self) -> Path:
-        return self.state_file.with_name("equity.jsonl")
+        return equity_path(self.state_file)
 
 
 _settings = DashboardSettings()

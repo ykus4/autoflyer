@@ -29,6 +29,7 @@ FLAT_STATE: dict[str, Any] = {
     "stop_order_id": None,  # 取引所に置いた逆指値の受付 ID
     "stop_order_px": None,
     "pending_exit": None,  # 決済できず再試行待ちの決済理由
+    "exit_unconfirmed": False,  # 決済注文の結果が不明（建玉で確かめるまで再発注しない）
 }
 
 STATE_DEFAULT: dict[str, Any] = {

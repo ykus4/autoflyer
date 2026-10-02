@@ -43,11 +43,21 @@ class ExchangePosition:
     avg_price: float
 
 
+class OrderOutcomeUnknown(Exception):
+    """注文を送ったが受け付けられたか分からない（タイムアウト・5xx など）。"""
+
+
 # 逆指値の状態
 STOP_ACTIVE = "active"
 STOP_FILLED = "filled"  # 約定済み（一部約定を含む）
 STOP_GONE = "gone"  # 取消・失効済みで約定なし
 STOP_UNKNOWN = "unknown"  # 取得失敗・未反映
+
+
+@dataclass(frozen=True)
+class StopInfo:
+    status: str  # STOP_*
+    executed: float = 0.0  # 約定済み数量（一部約定なら建玉より小さい）
 
 
 class Broker(Protocol):
@@ -60,10 +70,10 @@ class Broker(Protocol):
     def available_jpy(self) -> float: ...
     def market(self, order_side: str, size: float, ref_price: float) -> Fill | None: ...
     def position(self) -> ExchangePosition | None: ...
-    def stop_status(self, order_id: str) -> str: ...
+    def stop_status(self, order_id: str) -> StopInfo: ...
     def active_stop_ids(self) -> list[str] | None: ...
     def place_stop(self, order_side: str, size: float, trigger: float) -> str: ...
-    def cancel_stop(self, order_id: str) -> str: ...
+    def cancel_stop(self, order_id: str) -> StopInfo: ...
 
 
 def unrealized_pnl(side: str | None, btc: float, entry: float, price: float) -> float:
@@ -94,8 +104,8 @@ class PaperBroker:
     def position(self) -> ExchangePosition | None:
         return None
 
-    def stop_status(self, order_id: str) -> str:
-        return STOP_UNKNOWN
+    def stop_status(self, order_id: str) -> StopInfo:
+        return StopInfo(STOP_UNKNOWN)
 
     def active_stop_ids(self) -> list[str] | None:
         return None
@@ -103,7 +113,7 @@ class PaperBroker:
     def place_stop(self, order_side: str, size: float, trigger: float) -> str:
         raise NotImplementedError
 
-    def cancel_stop(self, order_id: str) -> str:
+    def cancel_stop(self, order_id: str) -> StopInfo:
         raise NotImplementedError
 
 
@@ -174,8 +184,21 @@ class LiveBroker:
     # ---- 注文 ----
 
     def market(self, order_side: str, size: float, ref_price: float) -> Fill | None:
-        """成行注文を出し、約定を確認して返す。拒否されたら None。"""
-        resp = self.client.create_order(self.product_code, order_side, size)
+        """成行注文を出し、約定を確認して返す。
+
+        拒否が確定（4xx・REJECTED 等）なら None。受け付けられたか分からなければ
+        `OrderOutcomeUnknown` を送出する（呼び出し側は建玉を確かめるまで再発注しない）。
+        """
+        try:
+            resp = self.client.create_order(self.product_code, order_side, size)
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else None
+            if code is not None and 400 <= code < 500:
+                log.error("注文が拒否された (%s): %s", code, e)
+                return None
+            raise OrderOutcomeUnknown(str(e)) from e
+        except requests.RequestException as e:
+            raise OrderOutcomeUnknown(str(e)) from e
         acceptance_id = resp.get("child_order_acceptance_id")
         log.info(
             "Order accepted: %s %s %.8f BTC (%s)",
@@ -212,30 +235,38 @@ class LiveBroker:
         log.error("約定を確認できなかった (%s) — 依頼値で記録します: %s", acceptance_id, order)
         return Fill(size, ref_price, confirmed=False)
 
-    def stop_status(self, order_id: str) -> str:
-        """逆指値の状態を STOP_* で返す。"""
+    def stop_status(self, order_id: str) -> StopInfo:
+        """逆指値の状態と約定済み数量。"""
         try:
             order = self.client.fetch_parent_order_status(self.product_code, order_id)
         except requests.RequestException as e:
             log.warning("逆指値の状態取得に失敗 (%s)", e)
-            return STOP_UNKNOWN
+            return StopInfo(STOP_UNKNOWN)
         if order is None:
-            return STOP_UNKNOWN
+            return StopInfo(STOP_UNKNOWN)
         state = order.get("parent_order_state")
-        if float(order.get("executed_size") or 0) > 0 or state == "COMPLETED":
-            return STOP_FILLED
+        executed = float(order.get("executed_size") or 0)
+        if executed > 0 or state == "COMPLETED":
+            return StopInfo(STOP_FILLED, executed or float(order.get("size") or 0))
         if state == "ACTIVE":
-            return STOP_ACTIVE
-        return STOP_GONE
+            return StopInfo(STOP_ACTIVE)
+        return StopInfo(STOP_GONE)
 
     def active_stop_ids(self) -> list[str] | None:
-        """有効な特殊注文の受付 ID 一覧。取得に失敗したら None。"""
+        """有効な逆指値（STOP 型の特殊注文）の受付 ID。取得に失敗したら None。
+
+        IFD/OCO など他の特殊注文は対象外（手動の注文を巻き込まないため）。
+        """
         try:
             active = self.client.fetch_active_parent_orders(self.product_code)
         except requests.RequestException as e:
             log.warning("有効な逆指値の取得に失敗 (%s)", e)
             return None
-        return [str(o["parent_order_acceptance_id"]) for o in active]
+        return [
+            str(o["parent_order_acceptance_id"])
+            for o in active
+            if o.get("parent_order_type", "STOP") == "STOP"
+        ]
 
     def place_stop(self, order_side: str, size: float, trigger: float) -> str:
         order_id = self.client.create_stop_order(self.product_code, order_side, size, trigger)
@@ -244,8 +275,8 @@ class LiveBroker:
         )
         return order_id
 
-    def cancel_stop(self, order_id: str) -> str:
-        """逆指値を取り消し、取消が反映されるまで待って最終状態（STOP_*）を返す。
+    def cancel_stop(self, order_id: str) -> StopInfo:
+        """逆指値を取り消し、取消が反映されるまで待って最終状態を返す。
 
         STOP_GONE なら約定なしで消えたことが確定。STOP_FILLED なら取消前に約定していた。
         STOP_ACTIVE / STOP_UNKNOWN は確定できなかったことを意味し、呼び出し側は
@@ -256,11 +287,11 @@ class LiveBroker:
         except requests.RequestException as e:
             # 約定済み・取消済みの注文は取り消せない。状態を照会して確かめる
             log.warning("逆指値の取消に失敗 (%s): %s", order_id, e)
-        status = STOP_UNKNOWN
+        info = StopInfo(STOP_UNKNOWN)
         for _ in range(_FILL_POLL_ATTEMPTS):
-            status = self.stop_status(order_id)
-            if status in (STOP_GONE, STOP_FILLED):
+            info = self.stop_status(order_id)
+            if info.status in (STOP_GONE, STOP_FILLED):
                 break
             self._sleep(_FILL_POLL_INTERVAL_SEC)
-        log.info("Exchange stop %s after cancel: %s", order_id, status)
-        return status
+        log.info("Exchange stop %s after cancel: %s", order_id, info)
+        return info

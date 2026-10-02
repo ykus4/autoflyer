@@ -33,6 +33,8 @@ class FakeExchange:
         self.stop_timeouts = 0  # 逆指値の発注応答をタイムアウトさせる回数
         self.collateral_fails = False
         self.reject_orders = False
+        self.order_timeouts = 0
+        self.cancel_noop = False
         self.balance = {
             "JPY": {"free": 1_000_000.0, "total": 1_000_000.0},
             "BTC": {"free": 0.0, "total": 0.0},
@@ -78,9 +80,14 @@ class FakeExchange:
 
     def create_order(self, product_code, side, size):
         if self.reject_orders:
-            raise requests.HTTPError("400 rejected")
+            resp = requests.Response()
+            resp.status_code = 400
+            raise requests.HTTPError("400 rejected", response=resp)
         self.orders.append((side, size))
         self._execute(side, size, self.ltp)
+        if self.order_timeouts > 0:  # 約定したのに応答がタイムアウトする
+            self.order_timeouts -= 1
+            raise requests.Timeout("order timed out")
         acc = f"child-{len(self.orders)}"
         self.child_orders[acc] = {
             "child_order_state": "COMPLETED",
@@ -98,6 +105,7 @@ class FakeExchange:
         self.parents[acc] = {
             "parent_order_acceptance_id": acc,
             "parent_order_state": "ACTIVE",
+            "parent_order_type": "STOP",
             "executed_size": 0.0,
             "side": side,
             "size": size,
@@ -109,6 +117,8 @@ class FakeExchange:
         return acc
 
     def cancel_parent_order(self, product_code, acceptance_id):
+        if self.cancel_noop:  # 取消が反映されない
+            return
         o = self.parents.get(acceptance_id)
         if o is None or o["parent_order_state"] != "ACTIVE":
             return
@@ -642,3 +652,95 @@ class TestSpotAccount:
         bot.client.ltp = 1_000_000.0
         bot.step()
         assert bot.state["peak_cash"] == pytest.approx(500_000.0)
+
+
+class TestReviewRound2:
+    def test_close_timeout_does_not_double_sell(self, tmp_path):
+        bot = _bot(
+            tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False, exchange_stop=False
+        )
+        bot.step()
+        ex = bot.client
+        ex.order_timeouts = 1  # 売りは約定するが応答はタイムアウト
+        ex.ltp = float(bot.state["stop_px"]) * 0.99
+        bot.step()
+        assert [o[0] for o in ex.orders] == ["buy", "sell"]  # 同じサイクルで重ねて売らない
+        assert bot.state["exit_unconfirmed"] is True
+        bot.step()  # 照合で約定を確認して閉じる
+        assert [o[0] for o in ex.orders] == ["buy", "sell"]
+        assert bot.state["in_pos"] is False and bot.state["halted"] is False
+        assert ex.pos_size == 0
+
+    def test_close_failure_counts_once_per_poll(self, tmp_path):
+        bot = _bot(
+            tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False, exchange_stop=False
+        )
+        bot.step()
+        bot.client.reject_orders = True
+        bot.client.ltp = float(bot.state["stop_px"]) * 0.99
+        bot.step()
+        assert bot._close_failures == 1
+
+    def test_halt_keeps_a_protective_stop(self, tmp_path):
+        bot = _bot(tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False)
+        bot.step()
+        ex = bot.client
+        ex.reject_orders = True
+        for _ in range(3):  # シグナル決済が毎回拒否される（価格はストップより上）
+            bot._close_blocked = False
+            bot._close_position("ma_cross", ex.ltp, bot.state["last_bar_dt"])
+        assert bot.state["halted"] is True
+        assert ex.pos_size > 0
+        assert len(ex.stops) == 1  # 停止中も逆指値で守られている
+        (stop,) = ex.stops.values()
+        assert stop["size"] == pytest.approx(ex.pos_size)
+
+    def test_orphan_swept_on_new_bar(self, tmp_path):
+        bot = _bot(tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False)
+        bot.step()
+        ex = bot.client
+        orphan = ex.create_stop_order("FX_BTC_JPY", "sell", 0.1, 1)  # 後から現れた残骸
+        _advance(ex)
+        bot.step()
+        assert orphan not in ex.stops
+        assert bot.state["stop_order_id"] in ex.stops
+
+    def test_manual_parent_orders_are_left_alone(self, tmp_path):
+        ex = FakeExchange(_flat_bars())
+        acc = ex.create_stop_order("FX_BTC_JPY", "sell", 0.1, 1)
+        ex.parents[acc]["parent_order_type"] = "IFDOCO"
+        bot = _bot(tmp_path, BREAKOUT, exchange=ex, dry_run=False)
+        bot.step()
+        assert ex.parents[acc]["parent_order_state"] == "ACTIVE"
+
+    def test_uncancellable_leftover_stop_halts(self, tmp_path):
+        bot = _bot(tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False)
+        bot.step()
+        ex = bot.client
+        ex._execute("SELL", ex.pos_size, ex.ltp)  # 手動決済
+        ex.cancel_noop = True
+        assert bot.step() is False
+        assert bot.state["halted"] is True
+
+    def test_partial_stop_fill_on_spot_keeps_remainder(self, tmp_path):
+        ex = FakeExchange(_trending_bars(breakout=True))
+        bot = _bot(tmp_path, BREAKOUT, exchange=ex, dry_run=False, symbol="BTC_JPY")
+        bot.step()
+        btc = bot.state["btc"]
+        order = ex.parents[bot.state["stop_order_id"]]
+        order.update(parent_order_state="COMPLETED", executed_size=btc / 2)
+        bot.step()
+        assert bot.state["in_pos"] is True
+        assert bot.state["btc"] == pytest.approx(btc / 2)
+        assert len(ex.stops) == 1
+        assert next(iter(ex.stops.values()))["size"] == pytest.approx(btc / 2)
+
+    def test_stale_pending_entry_cleared(self, tmp_path):
+        ex = FakeExchange(_flat_bars())
+        bot = _bot(tmp_path, BREAKOUT, exchange=ex, dry_run=False)
+        bot.state["pending_entry"] = "long"
+        bot.step()
+        assert bot.state["pending_entry"] is None
+        ex._execute("BUY", 0.05, 3_000_000)  # 後から現れた手動の建玉は復元しない
+        assert bot.step() is False
+        assert bot.state["halted"] is True

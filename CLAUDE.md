@@ -14,10 +14,12 @@ autoflyer/
 │   ├── notifications.py     Email alerts (SMTP)
 │   ├── dashboard.py         Monitoring dashboard API (FastAPI, port 8080)
 │   ├── trading/             Live trading
-│   │   ├── bot.py           BotConfig + LiveBot polling loop
+│   │   ├── bot.py           BotConfig + LiveBot polling loop (reconcile, exchange stop, halt)
+│   │   ├── broker.py        Order execution / fill confirmation / account (Paper vs Live)
 │   │   ├── client.py        BitFlyerClient REST wrapper, retry/backoff
 │   │   ├── state.py         state.json persistence + equity.jsonl log
 │   │   ├── signals.py       Entry rules shared by bot and backtester
+│   │   ├── exits.py         Stop / TP / trailing state machine shared by bot and backtester
 │   │   ├── strategy.py      Variant definitions + lookup (VARIANTS, get_variant)
 │   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD, Supertrend)
 │   │   ├── garch_sizing.py  GARCH volatility-based position sizing
@@ -59,6 +61,7 @@ python -m autoflyer <command>
 | `update` | Append new bars to existing CSV |
 | `backtest` | Run backtest across variants and timeframes |
 | `bot` | Start live trading bot |
+| `reset-halt` | Clear the persisted halted flag (circuit breaker / mismatch) |
 | `dashboard` | Start monitoring dashboard at `http://localhost:8080` |
 | `variants` | List available strategy variants |
 
@@ -96,7 +99,7 @@ Previous best: `BREAKOUT_STOP1.5_GARCH40` (+136%, PF 2.62, DD 30.1% on the same 
 |---|---|
 | `BITFLYER_API_KEY` | bitFlyer API key |
 | `BITFLYER_API_SECRET` | bitFlyer API secret |
-| `DRY_RUN` | `1` = dry run, `0` = live |
+| `DRY_RUN` | `1` = dry run, `0` = live. Live orders need **both** `--live` and `DRY_RUN=0` |
 | `SYMBOL` | Trading pair (default: `FX_BTC_JPY`) |
 | `TIMEFRAME` | Candle timeframe for live bot (`1D`, `12H`, etc.) |
 | `VARIANT` | Strategy variant name |
@@ -121,9 +124,13 @@ Previous best: `BREAKOUT_STOP1.5_GARCH40` (+136%, PF 2.62, DD 30.1% on the same 
 
 ## Architecture Notes
 
-- **`trading/signals.py` is the single source of truth for entry rules.** The backtester
-  and the live bot both call `entry_signals()` / `long_ok()` / `position_size()`, so a
-  rule change applies to both. Never re-implement a filter in one engine only.
+- **`trading/signals.py` is the single source of truth for entry rules** and
+  **`trading/exits.py` for stops / take-profit / trailing.** The backtester and the live bot
+  both call them, so a rule change applies to both. Never re-implement a rule in one engine only.
+- **Live order safety (`trading/bot.py`):** while an exchange STOP order exists, the exchange owns
+  the stop-out; the bot only market-closes after `cancel_stop` confirms the stop is gone unfilled.
+  At most one close attempt per poll; unknown order outcomes (timeouts) are resolved from
+  `getpositions` before retrying. Anything ambiguous halts (`state.halted`) instead of guessing.
 - **Dependency direction is `analysis/` → `trading/`.** `trading/` must not import from
   `analysis/`.
 - Runtime files (state, equity, logs) all live under `var/`.

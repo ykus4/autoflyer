@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
+from .trading.broker import unrealized_pnl
 from .trading.client import BitFlyerClient
 from .trading.state import equity_path
 
@@ -119,9 +120,11 @@ def api_ticker(_: str = Depends(_auth)) -> dict:
         # 含み損益（ポジション保有中のみ）
         if state.get("in_pos") and state.get("entry_price") and state.get("btc"):
             entry = float(state["entry_price"])
-            btc = float(state["btc"])
-            result["unrealized_pnl"] = round((last - entry) * btc)
-            result["unrealized_pnl_pct"] = round((last / entry - 1) * 100, 2)
+            side = state.get("side") or "long"
+            pnl = unrealized_pnl(side, float(state["btc"]), entry, last)
+            direction = 1 if side == "long" else -1
+            result["unrealized_pnl"] = round(pnl)
+            result["unrealized_pnl_pct"] = round((last / entry - 1) * 100 * direction, 2)
     except (requests.RequestException, KeyError, ValueError) as e:
         result["error"] = f"ticker: {e}"
 

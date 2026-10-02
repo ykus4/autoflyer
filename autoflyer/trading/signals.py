@@ -15,7 +15,6 @@ import pandas as pd
 
 from ..config import DON_EXIT_TERM, DON_TERM
 from .garch_sizing import garch_position_fraction
-from .indicators import atr as compute_atr
 from .stats_filters import breakout_zscore, hmm_regime, hurst_exponent, kelly_fraction
 from .strategy import Variant
 
@@ -169,31 +168,8 @@ def short_ok(cur: pd.Series, v: Variant, on_reject: RejectLogger = _noop) -> boo
 
 
 # =========================
-# ストップ / サイジング
+# サイジング（ストップ・利確は `exits` を参照）
 # =========================
-
-
-def live_stop(
-    bars: pd.DataFrame,
-    entry_price: float,
-    side: str,
-    variant: Variant,
-) -> float | None:
-    """ライブボット用: 直近確定バーの ATR からストップ価格を計算する。
-
-    atr_stop_mult が 0、または ATR が得られなければ None。
-    """
-    if variant.atr_stop_mult <= 0:
-        return None
-    confirmed = bars.iloc[:-1]  # 最新バーは未確定なので除外
-    if confirmed.empty:
-        return None
-    atr_series = confirmed["atr"] if "atr" in confirmed.columns else compute_atr(confirmed)
-    cur_atr = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0.0
-    if cur_atr <= 0:
-        return None
-    dist = variant.atr_stop_mult * cur_atr
-    return entry_price - dist if side == "long" else entry_price + dist
 
 
 def sizing_fraction(

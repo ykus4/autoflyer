@@ -246,10 +246,13 @@ class LiveBroker:
             return StopInfo(STOP_UNKNOWN)
         state = order.get("parent_order_state")
         executed = float(order.get("executed_size") or 0)
-        if executed > 0 or state == "COMPLETED":
-            return StopInfo(STOP_FILLED, executed or float(order.get("size") or 0))
         if state == "ACTIVE":
-            return StopInfo(STOP_ACTIVE)
+            # 約定途中（executed > 0）でも最終状態ではないので確定扱いしない
+            return StopInfo(STOP_ACTIVE, executed)
+        if state == "COMPLETED":
+            return StopInfo(STOP_FILLED, executed or float(order.get("size") or 0))
+        if executed > 0:  # 一部約定のあと取消・失効
+            return StopInfo(STOP_FILLED, executed)
         return StopInfo(STOP_GONE)
 
     def active_stop_ids(self) -> list[str] | None:

@@ -73,6 +73,7 @@ _MIN_ORDER_BTC = 0.001  # bitFlyer の最小発注数量
 _SIZE_TOLERANCE_BTC = 1e-8
 _MAX_CLOSE_FAILURES = 3  # 決済注文が続けて失敗したら停止する
 _STOP_BREACH_GRACE_POLLS = 3  # 取引所の逆指値の約定を待つポーリング回数
+_UNCONFIRMED_GRACE_POLLS = 2  # 結果不明の決済注文が遅れて約定しないか待つポーリング回数
 
 # 決済理由のうち、損切り扱い（クールダウン開始）のもの
 _STOP_REASONS = {"stop", "trail_stop", "exchange_stop"}
@@ -147,6 +148,7 @@ class LiveBot:
         self._stop_breach_polls = 0
         self._started = False  # 起動後最初のサイクルで残骸の逆指値を掃除する
         self._close_blocked = False  # このサイクルで決済に失敗した（同じサイクルで再発注しない）
+        self._unconfirmed_polls = 0
         self._last_price = 0.0
         log.info("Loaded state: %s", self.state)
 
@@ -241,9 +243,10 @@ class LiveBot:
         """取引所の逆指値を外す。
 
         戻り値:
-          "clear"   逆指値はない／約定なしで消えたことを確認した → 成行決済してよい
-          "closed"  取消前に約定して建玉が閉じた → state は閉じた
-          "unsure"  取消を確認できない → 二重決済を避けるため今回は何もしない
+          "clear"     逆指値はない／約定なしで消えたことを確認した → 成行決済してよい
+          "closed"    取消前に約定して建玉が閉じた → state は閉じた
+          "deferred"  取消前に一部約定していた → 残りは次のサイクルで扱う
+          "unsure"    取消を確認できない → 二重決済を避けるため今回は何もしない
         """
         order_id = self.state.get("stop_order_id")
         if not order_id or not self.broker.supports_exchange_stop:
@@ -252,7 +255,8 @@ class LiveBot:
 
         info = self.broker.cancel_stop(order_id)
         if info.status == STOP_FILLED:
-            return "closed" if self._on_stop_filled(info, bar_dt) else "clear"
+            # 逆指値が約定していたら、このサイクルでは成行を出さない（残りは次サイクルで扱う）
+            return "closed" if self._on_stop_filled(info, bar_dt) else "deferred"
         if info.status != STOP_GONE:
             log.warning("逆指値 %s の取消を確認できない (%s) — 成行決済を見送る", order_id, info)
             return "unsure"
@@ -264,16 +268,12 @@ class LiveBot:
         return "clear"
 
     def _on_stop_filled(self, info: StopInfo, bar_dt: str) -> bool:
-        """逆指値の約定を反映する。建玉がすべて閉じたら True、一部残れば False。"""
-        if self.broker.tracks_positions:
-            ex = self.broker.position()
-            if ex is not None and ex.side not in (None, self.side):
-                self._halt(f"逆指値の約定後に逆方向の建玉: {ex.side} {ex.size:.8f}")
-                self._go_flat("exchange_stop", bar_dt)
-                return True
-            remaining = ex.size if ex is not None and ex.side == self.side else 0.0
-        else:
-            remaining = self.btc - info.executed
+        """最終状態になった逆指値の約定を反映する。建玉がすべて閉じたら True。
+
+        残量は逆指値の約定数量から求める（建玉照会は反映が遅れることがあるため使わない。
+        食い違いは次サイクルの照合で補正される）。
+        """
+        remaining = self.btc - info.executed
         if remaining <= _SIZE_TOLERANCE_BTC:
             self._record_external_close(bar_dt, via_stop=True)
             return True
@@ -396,16 +396,21 @@ class LiveBot:
                 )
                 self._go_flat(reason, bar_dt)
                 return
+            # 遅れて約定することがあるので、何回か建玉を確かめてから再試行する
+            self._unconfirmed_polls += 1
+            if self._unconfirmed_polls < _UNCONFIRMED_GRACE_POLLS:
+                self._close_blocked = True
+                return
+            self._unconfirmed_polls = 0
             self.state["exit_unconfirmed"] = False  # 約定していない。通常どおり再試行する
             self._save()
 
         if ex.side is None:
             order_id = self.state.get("stop_order_id")
             info = self.broker.stop_status(order_id) if order_id else None
-            if info is not None and info.status == STOP_FILLED:
-                self._on_stop_filled(info, bar_dt)
-            else:
-                self._record_external_close(bar_dt, via_stop=False)
+            # 取引所がノーポジなら全量閉じている（逆指値の約定か、Bot 外の決済）
+            via_stop = info is not None and info.status == STOP_FILLED
+            self._record_external_close(bar_dt, via_stop=via_stop)
         elif ex.side != self.side:
             self._halt(f"建玉の方向が不一致: state={self.side} / 取引所={ex.side} {ex.size:.8f}")
         elif abs(ex.size - self.btc) > _SIZE_TOLERANCE_BTC:
@@ -509,6 +514,9 @@ class LiveBot:
             return f"建玉には逆指値 {self.state['stop_order_px']} が置かれています。"
         if not self.broker.supports_exchange_stop:
             return "⚠ 建玉が残っていますが取引所の逆指値はありません。"
+        if self.state.get("exit_unconfirmed"):
+            # 決済済みかもしれない数量に逆指値を置くと、手元の別の BTC を売りかねない
+            return "⚠ 決済注文の結果が不明なため逆指値は置いていません。残高を確認してください。"
         stop_px = self.state["stop_px"]
         if stop_px is None or stop_hit(self.side, self._last_price, stop_px):
             return "⚠ 建玉が残っていますが、ストップ価格を越えているため逆指値を置けません。至急確認してください。"
@@ -573,6 +581,11 @@ class LiveBot:
         retired = self._retire_exchange_stop(bar_dt)
         if retired == "closed":
             return True
+        if retired == "deferred":
+            self._close_blocked = True
+            self.state["pending_exit"] = reason
+            self._save()
+            return False
         if retired == "unsure":
             return self._close_failed(reason, "逆指値の取消を確認できない")
 

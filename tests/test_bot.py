@@ -744,3 +744,39 @@ class TestReviewRound2:
         ex._execute("BUY", 0.05, 3_000_000)  # 後から現れた手動の建玉は復元しない
         assert bot.step() is False
         assert bot.state["halted"] is True
+
+
+class TestReviewRound3:
+    def test_lagging_positions_after_stop_fill_do_not_double_close(self, tmp_path):
+        bot = _bot(tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False)
+        bot.step()
+        ex = bot.client
+        order = ex.parents[bot.state["stop_order_id"]]
+        # 逆指値は約定済みだが建玉照会にはまだ反映されていない
+        order.update(parent_order_state="COMPLETED", executed_size=order["size"])
+        bot._close_position("ma_cross", ex.ltp, bot.state["last_bar_dt"])
+        assert [o[0] for o in ex.orders] == ["buy"]  # 成行を重ねない
+        assert bot.state["in_pos"] is False
+
+    def test_stop_mid_execution_is_not_final(self, tmp_path):
+        bot = _bot(tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False)
+        bot.step()
+        ex = bot.client
+        ex.cancel_noop = True
+        ex.parents[bot.state["stop_order_id"]]["executed_size"] = bot.state["btc"] / 2  # 約定途中
+        assert bot._close_position("ma_cross", ex.ltp, bot.state["last_bar_dt"]) is False
+        assert [o[0] for o in ex.orders] == ["buy"]
+        assert bot.state["in_pos"] is True
+
+    def test_unconfirmed_close_waits_before_retry(self, tmp_path):
+        bot = _bot(
+            tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False, exchange_stop=False
+        )
+        bot.step()
+        ex = bot.client
+        ex.reject_orders = False
+        bot.state.update(exit_unconfirmed=True, pending_exit="stop")  # 結果不明・未約定
+        bot.step()
+        assert [o[0] for o in ex.orders] == ["buy"]  # 1 回目は待つ
+        bot.step()
+        assert [o[0] for o in ex.orders] == ["buy", "sell"]  # 猶予後に再試行

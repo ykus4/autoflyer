@@ -20,13 +20,13 @@ from dotenv import load_dotenv
 
 from ..logging_utils import setup_logging
 from ..notifications import EmailNotifier, create_notifier
-from .client import BitFlyerClient
+from .client import BitFlyerClient, free_amount
 from .fees import FeeTierModel
 from .indicators import add_indicators
 from .signals import entry_signals, exit_signals, live_stop, long_ok, position_size
 from .signals import sizing_fraction as compute_sizing_fraction
-from .state import FLAT_STATE, append_equity, load_state, save_state
-from .strategy import VARIANTS, Variant
+from .state import FLAT_STATE, append_equity, equity_path, load_state, save_state
+from .strategy import Variant, get_variant
 
 log = logging.getLogger("autoflyer.bot")
 
@@ -63,7 +63,7 @@ class BotConfig:
 
     @property
     def equity_file(self) -> Path:
-        return self.state_file.with_name("equity.jsonl")
+        return equity_path(self.state_file)
 
 
 class LiveBot:
@@ -102,9 +102,14 @@ class LiveBot:
         log.info("Order placed: %s", order)
         return order
 
+    @property
+    def _fallback_jpy(self) -> float:
+        """残高を取得できない（DRY_RUN・API 失敗）ときに仮定する資金。"""
+        return self.cfg.amount_jpy or _FALLBACK_EQUITY_JPY
+
     def _estimated_equity(self, cur_price: float, btc_held: float, entry_price: float) -> float:
         """残高が取れないときの推定資産。"""
-        base = self.cfg.amount_jpy or _FALLBACK_EQUITY_JPY
+        base = self._fallback_jpy
         if not self.state["in_pos"]:
             return base
         return (cur_price - entry_price) * btc_held + base
@@ -119,8 +124,8 @@ class LiveBot:
             return self._estimated_equity(cur_price, btc_held, entry_price)
         try:
             bal = self.client.fetch_balance()
-            jpy_balance = float(bal.get("JPY", {}).get("free", 0))
-            btc_balance = float(bal.get("BTC", {}).get("free", 0))
+            jpy_balance = free_amount(bal, "JPY")
+            btc_balance = free_amount(bal, "BTC")
             equity = jpy_balance + btc_balance * cur_price
             log.info("残高: JPY=%.0f  BTC=%.6f  資産合計=%.0f", jpy_balance, btc_balance, equity)
             return equity
@@ -132,12 +137,12 @@ class LiveBot:
     def _available_jpy(self) -> float:
         """エントリーに使える資金。`--amount` があれば上限として適用する。"""
         if self.cfg.dry_run:
-            jpy = self.cfg.amount_jpy or _FALLBACK_EQUITY_JPY
+            jpy = self._fallback_jpy
         else:
             try:
-                jpy = float(self.client.fetch_balance().get("JPY", {}).get("free", 0))
+                jpy = free_amount(self.client.fetch_balance(), "JPY")
             except (requests.RequestException, KeyError, ValueError) as e:
-                jpy = self.cfg.amount_jpy or _FALLBACK_EQUITY_JPY
+                jpy = self._fallback_jpy
                 log.warning("残高取得失敗 (%s) — フォールバック %.0f JPY を使用", e, jpy)
         return min(jpy, self.cfg.amount_jpy) if self.cfg.amount_jpy > 0 else jpy
 
@@ -371,20 +376,11 @@ class LiveBot:
             time.sleep(self.cfg.interval)
 
 
-def resolve_variant(name: str) -> Variant:
-    v = next((v for v in VARIANTS if v.name == name), None)
-    if v is None:
-        raise SystemExit(
-            f"Unknown variant: {name}. Run `python -m autoflyer variants` to list them."
-        )
-    return v
-
-
 def _config_from_args(args: argparse.Namespace) -> BotConfig:
     return BotConfig(
         symbol=args.symbol,
         timeframe=args.timeframe[0] if args.timeframe else os.environ.get("TIMEFRAME", "1D"),
-        variant=resolve_variant(args.variant or os.environ.get("VARIANT", "STOP_3ATR")),
+        variant=get_variant(args.variant or os.environ.get("VARIANT", "STOP_3ATR")),
         dry_run=not args.live,
         amount_jpy=args.amount,
         interval=args.interval,
@@ -413,4 +409,4 @@ def run(args: argparse.Namespace) -> None:
     LiveBot(cfg, client, create_notifier()).run_forever()
 
 
-__all__ = ["BotConfig", "LiveBot", "resolve_variant", "run"]
+__all__ = ["BotConfig", "LiveBot", "run"]

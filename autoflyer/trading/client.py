@@ -20,7 +20,7 @@ import requests
 
 from ..timeframes import to_minutes, to_pandas_rule
 
-log = logging.getLogger("autoflyer.bot")
+log = logging.getLogger("autoflyer.client")
 
 _BF_BASE = "https://api.bitflyer.com"
 _COINGECKO_OHLC = "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc"
@@ -50,6 +50,11 @@ def retry_request(func: Callable[[], T]) -> T:
                 )
                 time.sleep(wait)
     raise last_exc  # type: ignore[misc]
+
+
+def free_amount(balance: dict[str, dict[str, float]], currency: str) -> float:
+    """`fetch_balance()` の結果から利用可能額を取り出す。通貨がなければ 0。"""
+    return float(balance.get(currency, {}).get("free", 0))
 
 
 def coingecko_days(tf: str, limit: int) -> int:

@@ -1,8 +1,11 @@
-"""MA-cross long/short backtester with stop-loss and trailing stop support."""
+"""Bar-by-bar long/short backtester with stop-loss, take-profit and trailing stops.
+
+Entry/exit rules come from `trading.signals` so results match the live bot.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -45,6 +48,106 @@ class _Position:
     tp_px: float | None = None  # 利確ターゲット
     tp_hit: bool = False  # 利確到達フラグ（トレーリング移行用）
 
+    @property
+    def is_long(self) -> bool:
+        return self.side == "long"
+
+    def favorable(self, bar: pd.Series) -> float:
+        """含み益方向の極値（ロング=高値 / ショート=安値）。"""
+        return float(bar["high"] if self.is_long else bar["low"])
+
+    def adverse(self, bar: pd.Series) -> float:
+        """含み損方向の極値（ロング=安値 / ショート=高値）。"""
+        return float(bar["low"] if self.is_long else bar["high"])
+
+    def equity(self, cash: float, price: float) -> float:
+        if self.is_long:
+            return cash + self.btc * price
+        return cash + (self.entry_price - price) * self.btc
+
+
+@dataclass
+class _Book:
+    """現金・手数料ティア・約定履歴をまとめて管理する口座。"""
+
+    cash: float
+    strategy: str
+    timeframe: str
+    slippage_pct: float
+    fees: FeeTierModel = field(default_factory=FeeTierModel)
+    trades: list[dict] = field(default_factory=list)
+
+    def open(
+        self,
+        side: str,
+        px: float,
+        stop_px: float | None,
+        fill_dt: pd.Timestamp,
+        signal_bar: pd.Series,
+        v: Variant,
+        cur_atr: float,
+        sizing_frac: float,
+    ) -> _Position:
+        """約定価格 `px`（スリッページ適用済み）で成行エントリーする。"""
+        tp_px = (
+            _profit_side(side, px, v.tp_atr_mult * cur_atr)
+            if v.tp_atr_mult > 0 and cur_atr > 0
+            else None
+        )
+        btc = position_size(self.cash, px, stop_px, self.fees.rate, v, sizing_frac)
+        if side == "long":
+            self.cash -= btc * px * (1.0 + self.fees.rate)
+        else:
+            self.cash -= btc * px * self.fees.rate  # ショート: 証拠金は別途管理、手数料のみ控除
+        self.fees.record_fill(pd.Timestamp(fill_dt), btc * px)
+        pos = _Position(
+            side=side,
+            btc=btc,
+            entry_price=px,
+            entry_dt=signal_bar["dt"],
+            entry_fee_rate=self.fees.rate,
+            stop_px=stop_px,
+            tp_px=tp_px,
+        )
+        if v.chandelier_mult > 0:
+            pos.trail_best = pos.favorable(signal_bar)
+        return pos
+
+    def close(self, pos: _Position, raw_px: float, exit_dt: pd.Timestamp, reason: str) -> None:
+        """次足始値で成行決済し、約定履歴に 1 行追加する。"""
+        exit_px = _apply_slippage(raw_px, pos.side, "exit", self.slippage_pct)
+        notional_exit = pos.btc * exit_px
+        fee_exit = notional_exit * self.fees.rate
+        self.fees.record_fill(pd.Timestamp(exit_dt), notional_exit)
+
+        total_fee = pos.btc * pos.entry_price * pos.entry_fee_rate + fee_exit
+        if pos.is_long:
+            gross = (exit_px - pos.entry_price) * pos.btc
+            self.cash += notional_exit - fee_exit
+        else:
+            gross = (pos.entry_price - exit_px) * pos.btc
+            self.cash += gross - fee_exit
+
+        net = gross - total_fee
+        self.trades.append(
+            {
+                "strategy": self.strategy,
+                "timeframe": self.timeframe,
+                "side": pos.side,
+                "exit_reason": reason,
+                "entry_dt": pos.entry_dt,
+                "exit_dt": exit_dt,
+                "entry_price": pos.entry_price,
+                "exit_price": exit_px,
+                "btc": pos.btc,
+                "gross_pnl_jpy": gross,
+                "fee_jpy": total_fee,
+                "net_pnl_jpy": net,
+                "cash_after": self.cash,
+                "win": int(net > 0),
+            }
+        )
+
 
 def run(
     bars: pd.DataFrame,
@@ -63,32 +166,35 @@ def run(
     slippage_pct: 成行約定価格に対するスリッページ率（例: 0.001 = 0.1%）。
     bars_with_ind: 事前計算済みの add_indicators() 結果。複数バリアントで共有することで
                    同じ時間足内での重複計算を避けられる。None の場合は内部で計算する。
+
+    バー i の終値でシグナルを判定し、約定はすべてバー i+1 の始値で行う。
     """
-    # add_indicators() は ma_fast/ma_slow を含む全指標を持つため、複数バリアントで
-    # 共有すれば時間足ごとの重複計算（ローリング + merge_asof）を丸ごと省ける。
     ind = bars_with_ind if bars_with_ind is not None else add_indicators(bars)
     if not ind["dt"].is_monotonic_increasing:
         ind = ind.sort_values("dt")
     x = ind.reset_index(drop=True)
+    v = variant
 
     # Supertrend トレーリングストップ用のラインを系列全体で 1 度だけ計算
     st_line = (
-        supertrend(x, variant.supertrend_mult).to_numpy() if variant.supertrend_mult > 0 else None
+        supertrend(x, v.supertrend_mult).to_numpy()
+        if v.supertrend_mult > 0
+        else np.full(len(x), np.nan)
     )
 
     # ウォークフォワード: train_end より前は取引しない
     trade_start_idx = int((x["dt"] > train_end).argmax()) if train_end is not None else 0
 
-    fees = FeeTierModel()
-    cash = float(start_cash)
+    book = _Book(
+        cash=float(start_cash),
+        strategy=f"{v.name}/{tf_label}",
+        timeframe=tf_label,
+        slippage_pct=slippage_pct,
+    )
     pos: _Position | None = None
-    cooldown_remaining: int = 0
+    cooldown_remaining = 0
     garch_cache: dict[tuple[int, float], float] = {}
-
-    trades: list[dict] = []
     equity_rows: list[dict] = []
-    v = variant
-    strat_name = f"{v.name}/{tf_label}"
 
     for i in range(_WARMUP, len(x) - 1):
         cur = x.iloc[i]
@@ -98,97 +204,33 @@ def run(
         if pd.isna(cur["close"]) or pd.isna(nxt["open"]):
             continue
 
-        fees.step(pd.Timestamp(cur["dt"]))
+        book.fees.step(pd.Timestamp(cur["dt"]))
         cur_atr = float(cur["atr"]) if pd.notna(cur.get("atr")) else 0.0
-        cur_close = float(cur["close"])
+        st_val = float(st_line[i])
+        next_open = float(nxt["open"])
         if cooldown_remaining > 0:
             cooldown_remaining -= 1
 
+        cur_close = float(cur["close"])
         equity_rows.append(
             {
-                "strategy": strat_name,
+                "strategy": book.strategy,
                 "timeframe": tf_label,
                 "dt": cur["dt"],
-                "equity": _equity(cash, pos, cur_close),
+                "equity": book.cash if pos is None else pos.equity(book.cash, cur_close),
                 "in_pos": int(pos is not None),
-                "fee_rate": fees.rate,
+                "fee_rate": book.fees.rate,
             }
         )
 
-        # チャンデリア追跡ストップ更新（バーごとにピークを更新）
-        if pos is not None and v.chandelier_mult > 0 and cur_atr > 0 and not pos.tp_hit:
-            if pos.side == "long":
-                pos.trail_best = max(pos.trail_best or float(cur["high"]), float(cur["high"]))
-                pos.stop_px = pos.trail_best - v.chandelier_mult * cur_atr
-            else:
-                pos.trail_best = min(pos.trail_best or float(cur["low"]), float(cur["low"]))
-                pos.stop_px = pos.trail_best + v.chandelier_mult * cur_atr
-
-        # Supertrend トレーリングストップ更新（フリップ済みラインをそのまま採用）
-        if pos is not None and st_line is not None and not pos.tp_hit:
-            st_val = st_line[i]
-            if not np.isnan(st_val):
-                pos.stop_px = float(st_val)
-
-        # 固定 ATR ストップも毎バー最新 ATR で更新（エントリー価格は固定）
-        if (
-            pos is not None
-            and v.atr_stop_mult > 0
-            and v.chandelier_mult == 0
-            and cur_atr > 0
-            and not pos.tp_hit
-        ):
-            if pos.side == "long":
-                pos.stop_px = pos.entry_price - v.atr_stop_mult * cur_atr
-            else:
-                pos.stop_px = pos.entry_price + v.atr_stop_mult * cur_atr
-
-        # 利確到達判定 & トレーリング移行
-        if pos is not None and pos.tp_px is not None and not pos.tp_hit:
-            tp_triggered = (pos.side == "long" and float(cur["high"]) >= pos.tp_px) or (
-                pos.side == "short" and float(cur["low"]) <= pos.tp_px
-            )
-            if tp_triggered:
-                if v.tp_trail_mult > 0 and cur_atr > 0:
-                    # 利確到達 → トレーリングストップに移行
-                    pos.tp_hit = True
-                    if pos.side == "long":
-                        pos.trail_best = float(cur["high"])
-                        pos.stop_px = pos.trail_best - v.tp_trail_mult * cur_atr
-                    else:
-                        pos.trail_best = float(cur["low"])
-                        pos.stop_px = pos.trail_best + v.tp_trail_mult * cur_atr
-                else:
-                    # トレーリングなし → 即利確決済
-                    exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
-                    cash = _close(
-                        trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, "tp"
-                    )
-                    pos = None
-                    continue
-
-        # 利確後トレーリング更新
-        if pos is not None and pos.tp_hit and v.tp_trail_mult > 0 and cur_atr > 0:
-            if pos.side == "long":
-                pos.trail_best = max(pos.trail_best or float(cur["high"]), float(cur["high"]))
-                pos.stop_px = pos.trail_best - v.tp_trail_mult * cur_atr
-            else:
-                pos.trail_best = min(pos.trail_best or float(cur["low"]), float(cur["low"]))
-                pos.stop_px = pos.trail_best + v.tp_trail_mult * cur_atr
-
-        # ストップ発動
-        if pos is not None and pos.stop_px is not None:
-            hit = (pos.side == "long" and float(cur["low"]) <= pos.stop_px) or (
-                pos.side == "short" and float(cur["high"]) >= pos.stop_px
-            )
-            if hit:
-                reason = "trail_stop" if pos.tp_hit else "stop"
-                exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
-                cash = _close(
-                    trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, reason
-                )
+        # ストップ / 利確の管理
+        if pos is not None:
+            reason = _manage_position(pos, cur, v, cur_atr, st_val)
+            if reason is not None:
+                book.close(pos, next_open, nxt["dt"], reason)
                 pos = None
-                cooldown_remaining = v.cooldown_bars
+                if reason != "tp":
+                    cooldown_remaining = v.cooldown_bars
                 continue
 
         # エントリー / エグジットともバリアントのモードに従う
@@ -199,85 +241,29 @@ def run(
         if (
             pos is not None
             and not pos.tp_hit
-            and ((pos.side == "long" and exit_long_sig) or (pos.side == "short" and exit_short_sig))
+            and (exit_long_sig if pos.is_long else exit_short_sig)
         ):
-            exit_px = _apply_slippage(float(nxt["open"]), pos.side, "exit", slippage_pct)
-            cash = _close(
-                trades, pos, exit_px, nxt["dt"], fees, cash, strat_name, tf_label, exit_reason(v)
-            )
+            book.close(pos, next_open, nxt["dt"], exit_reason(v))
             pos = None
 
         # エントリー（test 期間のみ、クールダウン中はスキップ）
-        if pos is None and i >= trade_start_idx and cooldown_remaining == 0:
-            # 統計フィルター用の close 履歴
-            close_hist = x["close"].iloc[: i + 1]
+        if pos is not None or i < trade_start_idx or cooldown_remaining != 0:
+            continue
 
-            if entry_long_sig and long_ok(cur, v, close_hist):
-                raw_px = float(nxt["open"])
-                px = _apply_slippage(raw_px, "long", "entry", slippage_pct)
+        close_hist = x["close"].iloc[: i + 1]  # 統計フィルター用の close 履歴
+        if entry_long_sig and long_ok(cur, v, close_hist):
+            side = "long"
+        elif entry_short_sig and v.enable_short and short_ok(cur, v):
+            side = "short"
+        else:
+            continue
 
-                # Supertrend or MAEベース or 固定ATRストップ（Supertrend が最優先）
-                if st_line is not None and not np.isnan(st_line[i]):
-                    stop_px = float(st_line[i])
-                elif v.use_mae_stop and cur_atr > 0:
-                    atr_hist = x["atr"].iloc[: i + 1] if "atr" in x.columns else None
-                    if atr_hist is not None:
-                        mae_mult = mae_optimal_stop(close_hist, atr_hist)
-                        stop_px = px - mae_mult * cur_atr
-                    else:
-                        stop_px = px - 1.5 * cur_atr
-                elif v.atr_stop_mult > 0 and cur_atr > 0:
-                    stop_px = px - v.atr_stop_mult * cur_atr
-                else:
-                    stop_px = None
+        px = _apply_slippage(next_open, side, "entry", slippage_pct)
+        stop_px = _initial_stop(side, px, v, cur_atr, st_val, close_hist, x["atr"].iloc[: i + 1])
+        sizing_frac = sizing_fraction(close_hist, v, garch_cache)
+        pos = book.open(side, px, stop_px, nxt["dt"], cur, v, cur_atr, sizing_frac)
 
-                tp_px = (
-                    (px + v.tp_atr_mult * cur_atr) if v.tp_atr_mult > 0 and cur_atr > 0 else None
-                )
-
-                sizing_frac = sizing_fraction(close_hist, v, garch_cache)
-                btc = position_size(cash, px, stop_px, fees.rate, v, sizing_frac)
-                cash -= btc * px * (1.0 + fees.rate)
-                fees.record_fill(pd.Timestamp(nxt["dt"]), btc * px)
-                pos = _Position(
-                    side="long",
-                    btc=btc,
-                    entry_price=px,
-                    entry_dt=cur["dt"],
-                    entry_fee_rate=fees.rate,
-                    stop_px=stop_px,
-                    trail_best=float(cur["high"]) if v.chandelier_mult > 0 else None,
-                    tp_px=tp_px,
-                )
-
-            elif entry_short_sig and v.enable_short and short_ok(cur, v):
-                raw_px = float(nxt["open"])
-                px = _apply_slippage(raw_px, "short", "entry", slippage_pct)
-                if st_line is not None and not np.isnan(st_line[i]):
-                    stop_px = float(st_line[i])
-                elif v.atr_stop_mult > 0 and cur_atr > 0:
-                    stop_px = px + v.atr_stop_mult * cur_atr
-                else:
-                    stop_px = None
-                tp_px = (
-                    (px - v.tp_atr_mult * cur_atr) if v.tp_atr_mult > 0 and cur_atr > 0 else None
-                )
-                sizing_frac = sizing_fraction(close_hist, v, garch_cache)
-                btc = position_size(cash, px, stop_px, fees.rate, v, sizing_frac)
-                cash -= btc * px * fees.rate  # ショート: 証拠金は別途管理、手数料のみ控除
-                fees.record_fill(pd.Timestamp(nxt["dt"]), btc * px)
-                pos = _Position(
-                    side="short",
-                    btc=btc,
-                    entry_price=px,
-                    entry_dt=cur["dt"],
-                    entry_fee_rate=fees.rate,
-                    stop_px=stop_px,
-                    trail_best=float(cur["low"]) if v.chandelier_mult > 0 else None,
-                    tp_px=tp_px,
-                )
-
-    return pd.DataFrame(trades), pd.DataFrame(equity_rows)
+    return pd.DataFrame(book.trades), pd.DataFrame(equity_rows)
 
 
 # =========================
@@ -285,58 +271,77 @@ def run(
 # =========================
 
 
-def _equity(cash: float, pos: _Position | None, price: float) -> float:
-    if pos is None:
-        return cash
-    if pos.side == "long":
-        return cash + pos.btc * price
-    return cash + (pos.entry_price - price) * pos.btc
+def _profit_side(side: str, ref: float, dist: float) -> float:
+    """`ref` から含み益方向へ `dist` 離れた価格。"""
+    return ref + dist if side == "long" else ref - dist
 
 
-def _close(
-    trades: list[dict],
-    pos: _Position,
-    exit_px: float,
-    exit_dt: pd.Timestamp,
-    fees: FeeTierModel,
-    cash: float,
-    strat_name: str,
-    tf_label: str,
-    exit_reason: str,
-) -> float:
-    notional_exit = pos.btc * exit_px
-    fee_exit = notional_exit * fees.rate
-    fees.record_fill(pd.Timestamp(exit_dt), notional_exit)
+def _loss_side(side: str, ref: float, dist: float) -> float:
+    """`ref` から含み損方向へ `dist` 離れた価格。"""
+    return ref - dist if side == "long" else ref + dist
 
-    if pos.side == "long":
-        gross = (exit_px - pos.entry_price) * pos.btc
-        total_fee = pos.btc * pos.entry_price * pos.entry_fee_rate + fee_exit
-        cash += notional_exit - fee_exit
-    else:
-        gross = (pos.entry_price - exit_px) * pos.btc
-        total_fee = pos.btc * pos.entry_price * pos.entry_fee_rate + fee_exit
-        cash += gross - fee_exit
 
-    net = gross - total_fee
-    trades.append(
-        {
-            "strategy": strat_name,
-            "timeframe": tf_label,
-            "side": pos.side,
-            "exit_reason": exit_reason,
-            "entry_dt": pos.entry_dt,
-            "exit_dt": exit_dt,
-            "entry_price": pos.entry_price,
-            "exit_price": exit_px,
-            "btc": pos.btc,
-            "gross_pnl_jpy": gross,
-            "fee_jpy": total_fee,
-            "net_pnl_jpy": net,
-            "cash_after": cash,
-            "win": int(net > 0),
-        }
-    )
-    return cash
+def _trail(pos: _Position, bar: pd.Series, dist: float) -> None:
+    """ピーク（ロング=最高値 / ショート=最安値）を更新し、そこから `dist` 離してストップを置く。"""
+    extreme = pos.favorable(bar)
+    best = pos.trail_best or extreme
+    pos.trail_best = max(best, extreme) if pos.is_long else min(best, extreme)
+    pos.stop_px = _loss_side(pos.side, pos.trail_best, dist)
+
+
+def _initial_stop(
+    side: str,
+    px: float,
+    v: Variant,
+    cur_atr: float,
+    st_val: float,
+    close_hist: pd.Series,
+    atr_hist: pd.Series,
+) -> float | None:
+    """エントリー時のストップ。優先順位は Supertrend > MAE（ロングのみ）> 固定 ATR。"""
+    if not np.isnan(st_val):
+        return st_val
+    if side == "long" and v.use_mae_stop and cur_atr > 0:
+        return px - mae_optimal_stop(close_hist, atr_hist) * cur_atr
+    if v.atr_stop_mult > 0 and cur_atr > 0:
+        return _loss_side(side, px, v.atr_stop_mult * cur_atr)
+    return None
+
+
+def _manage_position(
+    pos: _Position, bar: pd.Series, v: Variant, cur_atr: float, st_val: float
+) -> str | None:
+    """バー確定時にストップ/利確を更新し、決済すべきなら理由を返す。
+
+    利確到達前は チャンデリア → Supertrend → 固定 ATR の順でストップを引き直す
+    （後に書いたものが優先）。利確到達後は `tp_trail_mult` のトレーリングに切り替える。
+    """
+    if not pos.tp_hit:
+        if v.chandelier_mult > 0 and cur_atr > 0:
+            _trail(pos, bar, v.chandelier_mult * cur_atr)
+        if not np.isnan(st_val):
+            pos.stop_px = st_val
+        # 固定 ATR ストップは毎バー最新 ATR で更新（エントリー価格は固定）
+        if v.atr_stop_mult > 0 and v.chandelier_mult == 0 and cur_atr > 0:
+            pos.stop_px = _loss_side(pos.side, pos.entry_price, v.atr_stop_mult * cur_atr)
+
+        if pos.tp_px is not None:
+            fav = pos.favorable(bar)
+            tp_reached = fav >= pos.tp_px if pos.is_long else fav <= pos.tp_px
+            if tp_reached:
+                if not (v.tp_trail_mult > 0 and cur_atr > 0):
+                    return "tp"  # トレーリングなし → 即利確決済
+                pos.tp_hit = True  # 利確到達 → ここからトレーリング
+                pos.trail_best = fav
+
+    if pos.tp_hit and v.tp_trail_mult > 0 and cur_atr > 0:
+        _trail(pos, bar, v.tp_trail_mult * cur_atr)
+
+    if pos.stop_px is not None:
+        adv = pos.adverse(bar)
+        if (adv <= pos.stop_px) if pos.is_long else (adv >= pos.stop_px):
+            return "trail_stop" if pos.tp_hit else "stop"
+    return None
 
 
 def _apply_slippage(px: float, side: str, action: str, slippage_pct: float) -> float:

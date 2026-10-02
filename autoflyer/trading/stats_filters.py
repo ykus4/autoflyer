@@ -35,7 +35,7 @@ def hurst_exponent(close: pd.Series, lookback: int = 100) -> float:
 
     Returns 0.5 if insufficient data.
     """
-    series = close.iloc[-lookback:] if len(close) >= lookback else close
+    series = close.iloc[-lookback:]
     if len(series) < 20:
         return 0.5
 
@@ -92,7 +92,7 @@ def hmm_regime(close: pd.Series, lookback: int = 252) -> int:
         1: sideways (middle)
         2: bull (highest mean return state)
     """
-    series = close.iloc[-lookback:] if len(close) >= lookback else close
+    series = close.iloc[-lookback:]
     log_ret = log_returns(series).reshape(-1, 1)
 
     if len(log_ret) < 30:
@@ -147,7 +147,7 @@ def kelly_fraction(
         f = (win_rate * b - (1 - win_rate)) / b
     else:
         # Estimate from bar returns
-        series = close.iloc[-lookback:] if len(close) >= lookback else close
+        series = close.iloc[-lookback:]
         returns = series.pct_change().dropna().to_numpy()
         if len(returns) < 10:
             return 0.5
@@ -180,7 +180,7 @@ def breakout_zscore(close: pd.Series, lookback: int = 100) -> float:
     Measures how many standard deviations above the mean the current close is.
     Higher z → more statistically significant breakout.
     """
-    series = close.iloc[-lookback:] if len(close) >= lookback else close
+    series = close.iloc[-lookback:]
     if len(series) < 20:
         return 0.0
 
@@ -214,12 +214,8 @@ def mae_optimal_stop(
 
     Returns ATR multiplier (e.g., 1.8 means stop at entry - 1.8*ATR).
     """
-    c = close.iloc[-lookback:].to_numpy() if len(close) >= lookback else close.to_numpy()
-    a = (
-        atr_series.iloc[-lookback:].to_numpy()
-        if len(atr_series) >= lookback
-        else atr_series.to_numpy()
-    )
+    c = close.iloc[-lookback:].to_numpy()
+    a = atr_series.iloc[-lookback:].to_numpy()
 
     if len(c) < 30 or len(a) < 30:
         return 1.5  # default fallback

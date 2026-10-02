@@ -34,7 +34,7 @@ def garch_vol_forecast(
 
     Falls back to rolling std if GARCH does not converge.
     """
-    series = close.iloc[-lookback:] if len(close) >= lookback else close
+    series = close.iloc[-lookback:]
     log_ret = log_returns(series) * 100  # percent returns
 
     if len(log_ret) < 30:

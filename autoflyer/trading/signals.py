@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 import pandas as pd
 
-from ..config import DON_EXIT_TERM, DON_TERM, MA_FAST, MA_SLOW
+from ..config import DON_EXIT_TERM, DON_TERM
 from .garch_sizing import garch_position_fraction
 from .indicators import atr as compute_atr
 from .stats_filters import breakout_zscore, hmm_regime, hurst_exponent, kelly_fraction
@@ -30,27 +30,6 @@ def _noop(_reason: str) -> None:
 # =========================
 # シグナル
 # =========================
-
-
-def compute_signal(bars: pd.DataFrame) -> tuple[bool, bool]:
-    """
-    終値確定済み直近 2 バーで MA クロスを判定する。
-    最新バー（未確定）は除外する。
-    Returns (cross_up, cross_down).
-    """
-    x = bars.iloc[:-1].copy().reset_index(drop=True)
-    if len(x) < MA_SLOW + 2:
-        return False, False
-
-    fast = x["close"].rolling(MA_FAST).mean()
-    slow = x["close"].rolling(MA_SLOW).mean()
-
-    if pd.isna(fast.iloc[-1]) or pd.isna(fast.iloc[-2]):
-        return False, False
-
-    cross_up = bool(fast.iloc[-2] <= slow.iloc[-2] and fast.iloc[-1] > slow.iloc[-1])
-    cross_down = bool(fast.iloc[-2] >= slow.iloc[-2] and fast.iloc[-1] < slow.iloc[-1])
-    return cross_up, cross_down
 
 
 def cross_up(cur: pd.Series, prev: pd.Series) -> bool:
@@ -200,23 +179,21 @@ def live_stop(
     side: str,
     variant: Variant,
 ) -> float | None:
-    """
-    ライブボット用: 現在の ATR からストップ価格を計算して返す。
-    atr_stop_mult が 0 なら None を返す。
+    """ライブボット用: 直近確定バーの ATR からストップ価格を計算する。
+
+    atr_stop_mult が 0、または ATR が得られなければ None。
     """
     if variant.atr_stop_mult <= 0:
         return None
-    x = bars.iloc[:-1].copy().reset_index(drop=True)
-    if x.empty or "atr" not in x.columns:
-        x["atr"] = compute_atr(x)
-    cur_atr = float(x["atr"].iloc[-1]) if pd.notna(x["atr"].iloc[-1]) else 0.0
+    confirmed = bars.iloc[:-1]  # 最新バーは未確定なので除外
+    if confirmed.empty:
+        return None
+    atr_series = confirmed["atr"] if "atr" in confirmed.columns else compute_atr(confirmed)
+    cur_atr = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0.0
     if cur_atr <= 0:
         return None
-    return (
-        entry_price - variant.atr_stop_mult * cur_atr
-        if side == "long"
-        else entry_price + variant.atr_stop_mult * cur_atr
-    )
+    dist = variant.atr_stop_mult * cur_atr
+    return entry_price - dist if side == "long" else entry_price + dist
 
 
 def sizing_fraction(

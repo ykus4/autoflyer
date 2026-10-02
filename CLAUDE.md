@@ -1,6 +1,6 @@
 # autoflyer
 
-BitFlyer FX_BTC_JPY automated trading bot using a MA-cross strategy. Single CLI for data fetching, backtesting, live trading, and dashboard.
+BitFlyer FX_BTC_JPY automated trading bot (Donchian breakout / MA-cross variants). Single CLI for data fetching, backtesting, live trading, and dashboard.
 
 ## Project Structure
 
@@ -18,13 +18,13 @@ autoflyer/
 │   │   ├── client.py        BitFlyerClient REST wrapper, retry/backoff
 │   │   ├── state.py         state.json persistence + equity.jsonl log
 │   │   ├── signals.py       Entry rules shared by bot and backtester
-│   │   ├── strategy.py      Variant definitions (Variant dataclass, VARIANTS)
+│   │   ├── strategy.py      Variant definitions + lookup (VARIANTS, get_variant)
 │   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD, Supertrend)
 │   │   ├── garch_sizing.py  GARCH volatility-based position sizing
 │   │   ├── stats_filters.py Statistical filters (Hurst, HMM, Kelly, z-score, MAE)
 │   │   └── fees.py          bitFlyer fee tier model
 │   ├── analysis/            Backtesting and data
-│   │   ├── backtest.py      Vectorized backtest engine
+│   │   ├── backtest.py      Bar-by-bar backtest engine
 │   │   ├── runner.py        Backtest orchestration across variants/timeframes
 │   │   ├── fetch.py         OHLCV fetching (GMO/Binance, incremental update)
 │   │   ├── data.py          CSV loading and OHLCV resampling
@@ -54,6 +54,7 @@ python -m autoflyer <command>
 
 | Command | Description |
 |---|---|
+| `fetch` | Fetch 1-minute OHLCV from GMO Coin |
 | `fetch-binance` | Fetch daily OHLCV from Binance (for backtesting) |
 | `update` | Append new bars to existing CSV |
 | `backtest` | Run backtest across variants and timeframes |
@@ -133,6 +134,6 @@ Previous best: `BREAKOUT_STOP1.5_GARCH40` (+136%, PF 2.62, DD 30.1% on the same 
 - [autoflyer/trading/signals.py](autoflyer/trading/signals.py) — entry filters, sizing, stops (shared)
 - [autoflyer/trading/bot.py](autoflyer/trading/bot.py) — live order logic, circuit breaker, state persistence
 - [autoflyer/notifications.py](autoflyer/notifications.py) — email notification module
-- [autoflyer/analysis/backtest.py](autoflyer/analysis/backtest.py) — vectorized backtest engine
+- [autoflyer/analysis/backtest.py](autoflyer/analysis/backtest.py) — backtest engine (`_manage_position` = stop/TP state machine)
 - [autoflyer/config.py](autoflyer/config.py) — constants (`START_CASH_JPY`, `TIMEFRAMES`, etc.)
 - [autoflyer/templates/dashboard.html](autoflyer/templates/dashboard.html) — dashboard UI

@@ -508,6 +508,30 @@ VARIANTS: list[Variant] = [
     ),
 ]
 
+_BY_NAME: dict[str, Variant] = {v.name: v for v in VARIANTS}
+assert len(_BY_NAME) == len(VARIANTS), "duplicate variant names"
+
+_UNKNOWN_HINT = "Run `python -m autoflyer variants` to list them."
+
+
+def get_variant(name: str) -> Variant:
+    """名前からバリアントを引く。未知の名前なら SystemExit。"""
+    v = _BY_NAME.get(name)
+    if v is None:
+        raise SystemExit(f"Unknown variant: {name}. {_UNKNOWN_HINT}")
+    return v
+
+
+def select_variants(names: list[str] | None) -> list[Variant]:
+    """名前リストに一致するバリアントを定義順で返す。None/空なら全件。"""
+    if not names:
+        return VARIANTS
+    unknown = sorted(set(names) - _BY_NAME.keys())
+    if unknown:
+        raise SystemExit(f"Unknown variant(s): {', '.join(unknown)}. {_UNKNOWN_HINT}")
+    return [v for v in VARIANTS if v.name in names]
+
+
 # `variants` コマンドの表示列: (見出し, 幅, 値の取り出し方)
 _TABLE_COLUMNS: list[tuple[str, int, Callable[[Variant], str]]] = [
     ("ma200", 5, lambda v: "✓" if v.use_ma200_filter else " "),

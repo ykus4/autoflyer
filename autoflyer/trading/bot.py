@@ -26,7 +26,7 @@ from .indicators import add_indicators
 from .signals import entry_signals, exit_signals, live_stop, long_ok, position_size
 from .signals import sizing_fraction as compute_sizing_fraction
 from .state import FLAT_STATE, append_equity, load_state, save_state
-from .strategy import VARIANTS, Variant
+from .strategy import Variant, get_variant
 
 log = logging.getLogger("autoflyer.bot")
 
@@ -371,20 +371,11 @@ class LiveBot:
             time.sleep(self.cfg.interval)
 
 
-def resolve_variant(name: str) -> Variant:
-    v = next((v for v in VARIANTS if v.name == name), None)
-    if v is None:
-        raise SystemExit(
-            f"Unknown variant: {name}. Run `python -m autoflyer variants` to list them."
-        )
-    return v
-
-
 def _config_from_args(args: argparse.Namespace) -> BotConfig:
     return BotConfig(
         symbol=args.symbol,
         timeframe=args.timeframe[0] if args.timeframe else os.environ.get("TIMEFRAME", "1D"),
-        variant=resolve_variant(args.variant or os.environ.get("VARIANT", "STOP_3ATR")),
+        variant=get_variant(args.variant or os.environ.get("VARIANT", "STOP_3ATR")),
         dry_run=not args.live,
         amount_jpy=args.amount,
         interval=args.interval,
@@ -413,4 +404,4 @@ def run(args: argparse.Namespace) -> None:
     LiveBot(cfg, client, create_notifier()).run_forever()
 
 
-__all__ = ["BotConfig", "LiveBot", "resolve_variant", "run"]
+__all__ = ["BotConfig", "LiveBot", "run"]

@@ -6,21 +6,8 @@ import pandas as pd
 
 from ..config import START_CASH_JPY, TIMEFRAMES
 from ..trading.indicators import add_indicators
-from ..trading.strategy import VARIANTS, Variant
+from ..trading.strategy import select_variants
 from . import backtest, data, report
-
-
-def _select_variants(names: list[str] | None) -> list[Variant]:
-    if not names:
-        return VARIANTS
-    selected = [v for v in VARIANTS if v.name in names]
-    unknown = set(names) - {v.name for v in selected}
-    if unknown:
-        raise SystemExit(
-            f"Unknown variant(s): {', '.join(sorted(unknown))}. "
-            f"Run `python -m autoflyer variants` to list them."
-        )
-    return selected
 
 
 def run_backtest(
@@ -31,7 +18,7 @@ def run_backtest(
     out_trades: str | None = None,
 ) -> None:
     tfs = timeframes or TIMEFRAMES
-    variants = _select_variants(variant_names)
+    variants = select_variants(variant_names)
     split = pd.Timestamp(train_end, tz="UTC") if train_end else None
 
     if split is not None:

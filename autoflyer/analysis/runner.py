@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pandas as pd
 
 from ..config import START_CASH_JPY, TIMEFRAMES
 from ..trading.indicators import add_indicators
 from ..trading.strategy import get_variant, select_variants
 from . import backtest, data, optimize, report
+from .metrics import performance_table
+
+DEFAULT_REPORT = "var/backtest/latest.json"
 
 
 def run_backtest(
@@ -18,6 +25,7 @@ def run_backtest(
     out_trades: str | None = None,
     costs: str = "spot",
     slippage_pct: float = 0.0,
+    report_path: str | None = DEFAULT_REPORT,
 ) -> None:
     tfs = timeframes or TIMEFRAMES
     variants = select_variants(variant_names)
@@ -74,6 +82,29 @@ def run_backtest(
     if out_trades:
         trades_all.to_csv(out_trades, index=False)
         print(f"Trades saved: {out_trades}")
+    if report_path:
+        save_report(
+            Path(report_path),
+            performance_table(equity_all),
+            csv=csv,
+            costs=costs,
+            slippage_pct=slippage_pct,
+            train_end=train_end,
+        )
+        print(f"Report saved: {report_path}")
+
+
+def save_report(path: Path, perf: pd.DataFrame, **meta: object) -> None:
+    """ダッシュボードで表示するためにバックテスト結果を JSON で保存する。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    perf = perf.sort_values("calmar", ascending=False, na_position="last")
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **meta,
+        # NaN は JSON にできないので None にする
+        "rows": json.loads(perf.round(4).to_json(orient="records")),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def _summary_line(trades: pd.DataFrame, variant_name: str, tf: str) -> str:

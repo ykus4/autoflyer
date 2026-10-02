@@ -34,12 +34,24 @@
           border-radius:6px; cursor:pointer; font-size:.8rem; }
   .btn:hover { background:#3d4a5c; }
   .chart-wrap { background:#1a1d27; border-radius:10px; padding:16px; margin-bottom:6px; }
+  .badge.short { background:#742a2a; color:#feb2b2; }
+  .banner { display:none; background:#742a2a; color:#fed7d7; border-radius:10px;
+             padding:12px 16px; margin:10px 0; font-size:.85rem; font-weight:600; }
+  table { width:100%; border-collapse:collapse; background:#1a1d27; border-radius:10px;
+          overflow:hidden; font-size:.75rem; }
+  th, td { padding:7px 10px; text-align:right; border-bottom:1px solid #232838; white-space:nowrap; }
+  th { color:#718096; font-weight:500; text-transform:uppercase; font-size:.65rem; }
+  td:first-child, th:first-child { text-align:left; }
+  .table-wrap { overflow-x:auto; max-height:360px; overflow-y:auto; border-radius:10px; }
+  .muted { color:#4a5568; font-size:.7rem; margin-top:6px; }
 </style>
 </head>
 <body>
 <h1>autoflyer bot</h1>
 <div class="ts" id="ts">最終更新: {{ now }}</div>
 <button class="btn" onclick="load()">↻ 更新</button>
+
+<div class="banner" id="halt-banner"></div>
 
 <h2>ポジション</h2>
 <div class="grid" id="pos-cards">読み込み中...</div>
@@ -54,12 +66,115 @@
   <canvas id="equityChart" height="90"></canvas>
 </div>
 
+<h2>価格と売買ポイント <span id="tf-label"></span></h2>
+<div class="chart-wrap">
+  <canvas id="priceChart" height="90"></canvas>
+</div>
+
+<h2>取引履歴</h2>
+<div class="table-wrap"><table id="trades"><tr><td>読み込み中...</td></tr></table></div>
+
+<h2>バックテスト結果（Calmar 順）</h2>
+<div class="table-wrap"><table id="backtest"><tr><td>読み込み中...</td></tr></table></div>
+<div class="muted" id="backtest-meta"></div>
+
 <h2>ログ</h2>
 <pre id="logs">読み込み中...</pre>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 let equityChart = null;
+let priceChart = null;
+
+function esc(v) {
+  return String(v ?? '—').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function shortLabel(iso) { return iso.slice(0, 16).replace('T', ' '); }
+
+// 約定時刻を、その時刻を含むローソク足（直前のラベル）の位置に割り当てる
+function markerPoints(labels, closes, trades, action) {
+  const times = labels.map(l => Date.parse(l));
+  const pts = [];
+  for (const t of trades) {
+    if (t.action !== action) continue;
+    const ts = Date.parse(t.dt);
+    let idx = -1;
+    for (let i = 0; i < times.length && times[i] <= ts; i++) idx = i;
+    if (idx < 0) continue;
+    pts.push({ x: shortLabel(labels[idx]), y: t.price ?? closes[idx], trade: t });
+  }
+  return pts;
+}
+
+function initPriceChart(candles, trades, stopPx) {
+  const labels = candles.labels;
+  const ctx = document.getElementById('priceChart').getContext('2d');
+  if (priceChart) priceChart.destroy();
+  const datasets = [
+    { type:'line', label:'終値', data: candles.close, borderColor:'#90cdf4',
+      borderWidth:1.2, pointRadius:0, tension:0.1 },
+    { type:'scatter', label:'エントリー', data: markerPoints(labels, candles.close, trades, 'entry'),
+      pointStyle:'triangle', pointRadius:7, backgroundColor:'#68d391' },
+    { type:'scatter', label:'決済', data: markerPoints(labels, candles.close, trades, 'exit'),
+      pointStyle:'rectRot', pointRadius:6, backgroundColor:'#fc8181' },
+  ];
+  if (stopPx) {
+    datasets.push({ type:'line', label:'ストップ', data: labels.map(() => stopPx),
+      borderColor:'#f6ad55', borderDash:[4,4], borderWidth:1, pointRadius:0 });
+  }
+  priceChart = new Chart(ctx, {
+    data: { labels: labels.map(shortLabel), datasets },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { labels: { color:'#718096', boxWidth:10 } },
+        tooltip: { callbacks: { label: c => {
+          const t = c.raw && c.raw.trade;
+          if (t) return `${t.action} ${t.side} ${Number(t.btc).toFixed(4)} BTC @ ${fmt(t.price)} (${t.reason})`;
+          return `${c.dataset.label}: ${fmt(c.parsed.y)} 円`;
+        } } }
+      },
+      scales: {
+        x: { ticks: { color:'#4a5568', maxTicksLimit:8 }, grid: { color:'#1e2535' } },
+        y: { ticks: { color:'#4a5568', callback: v => (v/10000).toFixed(0)+'万' }, grid: { color:'#1e2535' } }
+      }
+    }
+  });
+}
+
+function renderTrades(trades) {
+  if (!trades.length) {
+    document.getElementById('trades').innerHTML = '<tr><td>まだ取引はありません</td></tr>';
+    return;
+  }
+  const rows = trades.slice().reverse().map(t => {
+    const pnl = t.pnl == null ? '—'
+      : `<span class="${t.pnl >= 0 ? 'pos' : 'neg'}">${t.pnl >= 0 ? '+' : ''}${fmt(t.pnl)}</span>`;
+    return `<tr><td>${esc(new Date(t.dt).toLocaleString('ja-JP'))}</td><td>${esc(t.action)}</td>
+      <td>${esc(t.side)}</td><td>${fmtBtc(t.btc)}</td><td>${fmt(t.price)}</td>
+      <td>${esc(t.reason)}${t.dry_run ? ' (dry)' : ''}</td><td>${pnl}</td></tr>`;
+  }).join('');
+  document.getElementById('trades').innerHTML =
+    '<tr><th>日時</th><th>種別</th><th>方向</th><th>BTC</th><th>価格</th><th>理由</th><th>損益</th></tr>' + rows;
+}
+
+function renderBacktest(bt) {
+  const rows = (bt.rows || []).slice(0, 15);
+  if (!rows.length) {
+    document.getElementById('backtest').innerHTML =
+      '<tr><td>結果がありません（python -m autoflyer backtest で生成）</td></tr>';
+    return;
+  }
+  const num = (v, d=2) => v == null ? '—' : Number(v).toFixed(d);
+  document.getElementById('backtest').innerHTML =
+    '<tr><th>戦略</th><th>リターン%</th><th>CAGR%</th><th>最大DD%</th><th>Sharpe</th><th>Sortino</th><th>Calmar</th></tr>' +
+    rows.map(r => `<tr><td>${esc(r.strategy)}</td><td>${num(r.total_return_pct,1)}</td>
+      <td>${num(r.cagr_pct,1)}</td><td>${num(r.max_dd_pct,1)}</td><td>${num(r.sharpe)}</td>
+      <td>${num(r.sortino)}</td><td>${num(r.calmar)}</td></tr>`).join('');
+  document.getElementById('backtest-meta').textContent =
+    `生成: ${new Date(bt.generated_at).toLocaleString('ja-JP')}  データ: ${bt.csv ?? '—'}  コスト: ${bt.costs ?? '—'}`;
+}
 
 function initChart(labels, values) {
   const ctx = document.getElementById('equityChart').getContext('2d');
@@ -116,17 +231,27 @@ function fmtPct(n) {
 }
 
 async function load() {
-  const [sr, tr, lr, eq] = await Promise.all([
+  const [sr, tr, lr, eq, td, cd, bt] = await Promise.all([
     fetch('/api/state').then(r => r.json()),
     fetch('/api/ticker').then(r => r.json()),
     fetch('/api/logs').then(r => r.json()),
     fetch('/api/equity').then(r => r.json()),
+    fetch('/api/trades').then(r => r.json()),
+    fetch('/api/candles').then(r => r.json()),
+    fetch('/api/backtest').then(r => r.json()),
   ]);
 
   const inPos = sr.in_pos;
+  const side = (sr.side || 'long');
   const badge = inPos
-    ? '<span class="badge long">LONG</span>'
+    ? `<span class="badge ${side}">${side.toUpperCase()}</span>`
     : '<span class="badge flat">FLAT</span>';
+
+  const banner = document.getElementById('halt-banner');
+  banner.style.display = sr.halted ? 'block' : 'none';
+  banner.textContent = sr.halted
+    ? `⛔ Bot 停止中: ${sr.halt_reason ?? ''}（確認後 python -m autoflyer reset-halt で再開）`
+    : '';
 
   const pnlCls = (tr.unrealized_pnl ?? 0) >= 0 ? 'pos' : 'neg';
   const pnlSign = (tr.unrealized_pnl ?? 0) >= 0 ? '+' : '';
@@ -149,7 +274,7 @@ async function load() {
       <div class="label">ストップ価格</div>
       <div class="value neg">${fmt(sr.stop_px)} 円</div>
       ${sr.entry_price && sr.stop_px
-        ? `<div class="sub">下落幅 ${(((sr.stop_px - sr.entry_price) / sr.entry_price)*100).toFixed(1)}%</div>`
+        ? `<div class="sub">エントリーから ${(((sr.stop_px - sr.entry_price) / sr.entry_price)*100).toFixed(1)}%</div>`
         : ''}
     </div>
     <div class="card">
@@ -163,12 +288,16 @@ async function load() {
     </div>
   `;
 
-  document.getElementById('mkt-cards').innerHTML = `
+  const balanceCards = tr.is_cfd ? `
     <div class="card">
-      <div class="label">現在価格</div>
-      <div class="value neu">${fmt(tr.last_price)} 円</div>
-      <div class="sub">Bid ${fmt(tr.bid)} / Ask ${fmt(tr.ask)}</div>
+      <div class="label">証拠金</div>
+      <div class="value neu">${fmt(tr.collateral)} 円</div>
+      <div class="sub">評価損益 ${fmt(tr.open_position_pnl)} 円</div>
     </div>
+    <div class="card">
+      <div class="label">証拠金維持率</div>
+      <div class="value neu">${tr.keep_rate == null ? '—' : (tr.keep_rate * 100).toFixed(0) + '%'}</div>
+    </div>` : `
     <div class="card">
       <div class="label">JPY 残高</div>
       <div class="value neu">${fmt(tr.jpy_balance)} 円</div>
@@ -176,8 +305,18 @@ async function load() {
     <div class="card">
       <div class="label">BTC 残高</div>
       <div class="value neu">${fmtBtc(tr.btc_balance)}</div>
-    </div>
-  `;
+    </div>`;
+  document.getElementById('mkt-cards').innerHTML = `
+    <div class="card">
+      <div class="label">現在価格</div>
+      <div class="value neu">${fmt(tr.last_price)} 円</div>
+      <div class="sub">Bid ${fmt(tr.bid)} / Ask ${fmt(tr.ask)}</div>
+    </div>` + balanceCards;
+
+  if (cd.labels && cd.labels.length > 1) initPriceChart(cd, td.trades || [], inPos ? sr.stop_px : null);
+  document.getElementById('tf-label').textContent = cd.timeframe ? `(${cd.timeframe})` : '';
+  renderTrades(td.trades || []);
+  renderBacktest(bt);
 
   if (eq.labels.length > 1) initChart(eq.labels, eq.values);
   document.getElementById('err').textContent = tr.error ? '⚠ ' + tr.error : '';

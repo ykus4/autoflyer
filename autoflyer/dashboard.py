@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,8 @@ from fastapi.templating import Jinja2Templates
 
 from .trading.broker import unrealized_pnl
 from .trading.client import BitFlyerClient
-from .trading.state import equity_path
+from .trading.market_data import recent_ohlcv
+from .trading.state import equity_path, read_jsonl_tail, trades_path
 
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -41,10 +43,20 @@ class DashboardSettings:
     api_secret: str = ""
     user: str = ""
     password: str = ""
+    timeframe: str = "1D"
+    backtest_report: Path = field(default_factory=lambda: Path("var/backtest/latest.json"))
 
     @property
     def equity_file(self) -> Path:
         return equity_path(self.state_file)
+
+    @property
+    def trades_file(self) -> Path:
+        return trades_path(self.state_file)
+
+    @property
+    def is_cfd(self) -> bool:
+        return self.symbol.replace("/", "_").startswith("FX_")
 
 
 _settings = DashboardSettings()
@@ -107,6 +119,10 @@ def api_ticker(_: str = Depends(_auth)) -> dict:
         "unrealized_pnl_pct": None,
         "jpy_balance": None,
         "btc_balance": None,
+        "collateral": None,
+        "open_position_pnl": None,
+        "keep_rate": None,
+        "is_cfd": _settings.is_cfd,
         "error": None,
     }
 
@@ -130,9 +146,15 @@ def api_ticker(_: str = Depends(_auth)) -> dict:
 
     if _client.has_credentials:
         try:
-            bal = _client.fetch_balance()
-            result["jpy_balance"] = bal.get("JPY", {}).get("free")
-            result["btc_balance"] = bal.get("BTC", {}).get("free")
+            if _settings.is_cfd:
+                c = _client.fetch_collateral()
+                result["collateral"] = c.get("collateral")
+                result["open_position_pnl"] = c.get("open_position_pnl")
+                result["keep_rate"] = c.get("keep_rate")
+            else:
+                bal = _client.fetch_balance()
+                result["jpy_balance"] = bal.get("JPY", {}).get("free")
+                result["btc_balance"] = bal.get("BTC", {}).get("free")
         except (requests.RequestException, KeyError, ValueError) as e:
             result["error"] = (result["error"] or "") + f" balance: {e}"
 
@@ -154,6 +176,49 @@ def api_equity(n: int = 500, _: str = Depends(_auth)) -> dict:
         }
     except (json.JSONDecodeError, OSError, KeyError):
         return {"labels": [], "values": []}
+
+
+@app.get("/api/trades")
+def api_trades(n: int = 200, _: str = Depends(_auth)) -> dict:
+    """直近 n 件の約定（エントリー/決済）。"""
+    return {"trades": read_jsonl_tail(_settings.trades_file, n)}
+
+
+_candle_cache: dict[tuple[str, int], tuple[float, dict]] = {}
+_CANDLE_TTL_SEC = 300.0
+
+
+@app.get("/api/candles")
+def api_candles(n: int = 200, _: str = Depends(_auth)) -> dict:
+    """ボットと同じ時間足の終値（Binance BTCJPY）。チャートに売買点を重ねる下地。"""
+    key = (_settings.timeframe, n)
+    cached = _candle_cache.get(key)
+    if cached and time.time() - cached[0] < _CANDLE_TTL_SEC:
+        return cached[1]
+    try:
+        df = recent_ohlcv(_settings.timeframe, n)
+    except requests.RequestException as e:
+        return {"labels": [], "close": [], "error": str(e)}
+    result = {
+        "labels": [d.isoformat() for d in df["dt"]],
+        "close": [round(float(c)) for c in df["close"]],
+        "timeframe": _settings.timeframe,
+        "error": None,
+    }
+    _candle_cache[key] = (time.time(), result)
+    return result
+
+
+@app.get("/api/backtest")
+def api_backtest(_: str = Depends(_auth)) -> dict:
+    """`backtest` コマンドが保存した最新の成績表。"""
+    path = _settings.backtest_report
+    if not path.exists():
+        return {"rows": [], "generated_at": None}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"rows": [], "generated_at": None}
 
 
 @app.get("/api/logs")

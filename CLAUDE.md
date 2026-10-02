@@ -11,13 +11,13 @@ autoflyer/
 │   ├── config.py            Algorithm constants (MA periods, ATR length, etc.)
 │   ├── timeframes.py        Timeframe label parsing (`1D`/`3H` -> pandas rule)
 │   ├── logging_utils.py     JST log formatter and handler setup
-│   ├── notifications.py     Email alerts (SMTP)
+│   ├── notifications.py     Alerts: email (SMTP), Slack webhook, LINE Messaging API
 │   ├── dashboard.py         Monitoring dashboard API (FastAPI, port 8080)
 │   ├── trading/             Live trading
 │   │   ├── bot.py           BotConfig + LiveBot polling loop (reconcile, exchange stop, halt)
 │   │   ├── broker.py        Order execution / fill confirmation / account (Paper vs Live)
 │   │   ├── client.py        BitFlyerClient REST wrapper, retry/backoff
-│   │   ├── state.py         state.json persistence + equity.jsonl log
+│   │   ├── state.py         state.json persistence + equity.jsonl / trades.jsonl logs
 │   │   ├── signals.py       Entry rules shared by bot and backtester
 │   │   ├── exits.py         Stop / TP / trailing state machine shared by bot and backtester
 │   │   ├── strategy.py      Variant definitions + lookup (VARIANTS, get_variant)
@@ -118,6 +118,9 @@ Previous best: `BREAKOUT_STOP1.5_GARCH40` (+136%, PF 2.62, DD 30.1% on the same 
 | `SMTP_PASS` | SMTP password / app password |
 | `SMTP_FROM` | Sender email address (defaults to SMTP_USER) |
 | `NOTIFY_TO` | Notification recipient email address |
+| `SLACK_WEBHOOK_URL` | Slack Incoming Webhook URL (optional) |
+| `LINE_CHANNEL_TOKEN` / `LINE_TO` | LINE Messaging API token and recipient (optional) |
+| `DAILY_SUMMARY_HOUR` | JST hour for the daily summary (`-1` disables, default `9`) |
 
 **`config.py`** — algorithm constants (same across all environments): MA periods, ATR length, indicator parameters.
 

@@ -781,3 +781,88 @@ class TestReviewRound3:
         assert [o[0] for o in ex.orders] == ["buy"]  # 1 回目は待つ
         bot.step()
         assert [o[0] for o in ex.orders] == ["buy", "sell"]  # 猶予後に再試行
+
+
+class TestTradeLog:
+    def test_entry_and_exit_are_logged(self, tmp_path):
+        from autoflyer.trading.state import read_jsonl_tail
+
+        bot = _bot(
+            tmp_path, BREAKOUT, _trending_bars(breakout=True), dry_run=False, exchange_stop=False
+        )
+        bot.step()
+        bot.client.ltp = float(bot.state["stop_px"]) * 0.99
+        bot.step()
+        rows = read_jsonl_tail(bot.cfg.trades_file, 10)
+        assert [(r["action"], r["reason"]) for r in rows] == [("entry", "signal"), ("exit", "stop")]
+        assert rows[1]["pnl"] < 0 and rows[0]["side"] == "long"
+
+
+class CapturingNotifier:
+    enabled = True
+
+    def __init__(self):
+        self.sent: list[tuple[str, str]] = []
+
+    def send(self, subject, body):
+        self.sent.append((subject, body))
+
+
+class TestDailySummary:
+    def _bot(self, tmp_path, now):
+        cfg = _config(tmp_path, BREAKOUT, summary_hour_jst=9)
+        notifier = CapturingNotifier()
+        bot = LiveBot(cfg, FakeExchange(_trending_bars(breakout=True)), notifier)
+        bot._now = lambda: now[0]
+        return bot, notifier
+
+    def _summaries(self, notifier):
+        return [s for s in notifier.sent if s[0].startswith("日次サマリー")]
+
+    def test_sent_once_per_day_after_hour(self, tmp_path):
+        from datetime import datetime, timezone
+
+        now = [datetime(2026, 10, 1, 23, 0, tzinfo=timezone.utc)]  # JST 10/2 08:00
+        bot, notifier = self._bot(tmp_path, now)
+        bot.step()
+        assert self._summaries(notifier) == []
+        now[0] = datetime(2026, 10, 2, 0, 30, tzinfo=timezone.utc)  # JST 09:30
+        bot.step()
+        bot.step()
+        (summary,) = self._summaries(notifier)
+        assert summary[0] == "日次サマリー 2026-10-02"
+        assert "ポジション: long" in summary[1]
+
+    def test_lists_recent_trades(self, tmp_path):
+        from datetime import datetime, timezone
+
+        cfg = _config(tmp_path, BREAKOUT, summary_hour_jst=0)
+        notifier = CapturingNotifier()
+        bot = LiveBot(cfg, FakeExchange(_trending_bars(breakout=True)), notifier)
+        bot._now = lambda: datetime.now(timezone.utc)  # 約定の記録時刻と揃える
+        bot.step()  # エントリー（サマリーはエントリー前に送られる）
+        bot.state["last_summary_date"] = None
+        bot.step()
+        body = self._summaries(notifier)[-1][1]
+        assert "直近 24 時間の約定: 1 件" in body and "entry long" in body
+
+    def test_reports_change_since_previous_summary(self, tmp_path):
+        from datetime import datetime, timezone
+
+        now = [datetime(2026, 10, 2, 1, 0, tzinfo=timezone.utc)]
+        bot, notifier = self._bot(tmp_path, now)
+        bot.state["last_summary_equity"] = 900_000.0
+        bot.state["last_summary_date"] = "2026-10-01"
+        bot.step()
+        body = self._summaries(notifier)[0][1]
+        assert "前回比" in body
+
+    def test_disabled_with_negative_hour(self, tmp_path):
+        from datetime import datetime, timezone
+
+        cfg = _config(tmp_path, BREAKOUT, summary_hour_jst=-1)
+        notifier = CapturingNotifier()
+        bot = LiveBot(cfg, FakeExchange(_flat_bars()), notifier)
+        bot._now = lambda: datetime(2026, 10, 2, 5, 0, tzinfo=timezone.utc)
+        bot.step()
+        assert self._summaries(notifier) == []

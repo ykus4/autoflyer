@@ -54,6 +54,7 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         out_trades=args.out_trades,
         costs=args.costs,
         slippage_pct=args.slippage,
+        report_path=args.report or None,
     )
 
 
@@ -127,6 +128,8 @@ def _cmd_dashboard(args: argparse.Namespace) -> None:
             api_secret=os.environ.get("BITFLYER_API_SECRET", ""),
             user=user,
             password=os.environ.get("DASHBOARD_PASS", ""),
+            timeframe=os.environ.get("TIMEFRAME", "1D"),
+            backtest_report=Path(args.backtest_report),
         )
     )
     # 認証情報があるときだけ外部公開する
@@ -204,6 +207,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--variant", nargs="+", metavar="NAME")
     p.add_argument("--train-end", metavar="DATE")
     p.add_argument("--out-trades", metavar="PATH")
+    p.add_argument(
+        "--report",
+        default="var/backtest/latest.json",
+        metavar="PATH",
+        help="ダッシュボード用の結果 JSON（空文字で保存しない）",
+    )
     _add_cost_args(p)
 
     for name, help_text in (
@@ -255,6 +264,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-file", metavar="PATH")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--symbol", default="FX_BTC_JPY")
+    p.add_argument("--backtest-report", default="var/backtest/latest.json", metavar="PATH")
 
     sub.add_parser("variants", help="利用可能なバリアント一覧を表示")
 

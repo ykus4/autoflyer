@@ -116,3 +116,22 @@ def test_walk_forward_windows_are_out_of_sample():
     assert (starts.diff().dropna() == pd.Timedelta(days=180)).all()
     summary = optimize.summarize_walk_forward(wf)
     assert summary["windows"] == len(wf)
+
+
+def test_save_report_writes_json_without_nan(tmp_path):
+    import json
+
+    from autoflyer.analysis.runner import save_report
+
+    perf = pd.DataFrame(
+        [
+            {"strategy": "A/1D", "timeframe": "1D", "calmar": float("nan"), "cagr_pct": 1.0},
+            {"strategy": "B/1D", "timeframe": "1D", "calmar": 2.0, "cagr_pct": 5.0},
+        ]
+    )
+    out = tmp_path / "r" / "latest.json"
+    save_report(out, perf, csv="x.csv")
+    data = json.loads(out.read_text())
+    assert data["csv"] == "x.csv"
+    assert [r["strategy"] for r in data["rows"]] == ["B/1D", "A/1D"]
+    assert data["rows"][1]["calmar"] is None

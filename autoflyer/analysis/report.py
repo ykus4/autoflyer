@@ -7,6 +7,7 @@ import math
 import pandas as pd
 
 from ..config import SHOW_LAST_N_MONTHS, TZ_DISPLAY
+from .metrics import performance_table
 
 
 def print_overall_summary(trades: pd.DataFrame) -> None:
@@ -92,3 +93,12 @@ def print_monthly_pivot(trades: pd.DataFrame, label: str) -> None:
     print(pivot("fee_jpy").to_string())
     print(f"\n=== [{label}] Monthly Trades ===")
     print(pivot("net_pnl_jpy", agg="count").to_string())
+
+
+def print_performance(equity: pd.DataFrame) -> None:
+    """CAGR・シャープ・ソルティノ・カルマーなどの指標表（カルマー降順）。"""
+    if equity.empty:
+        return
+    table = performance_table(equity).sort_values("calmar", ascending=False, na_position="last")
+    print("\n=== Performance (CAGR / Sharpe / Sortino / Calmar) ===")
+    print(table.round(2).to_string(index=False))

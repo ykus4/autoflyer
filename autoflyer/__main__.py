@@ -7,6 +7,8 @@ Commands
   fetch-binance  Binance から日足 OHLCV を取得（長期バックテスト用）
   update         既存 CSV を今日まで差分更新
   backtest       CSV データを使ってバックテストを実行
+  grid           パラメータのグリッドサーチ
+  walk-forward   ウォークフォワード検証
   bot            BitFlyer FX ライブ取引ボットを起動
   reset-halt     サーキットブレーカーによる停止を解除
   dashboard      ボット監視ダッシュボードを起動
@@ -52,6 +54,39 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         out_trades=args.out_trades,
         costs=args.costs,
         slippage_pct=args.slippage,
+    )
+
+
+def _cmd_grid(args: argparse.Namespace) -> None:
+    from .analysis.runner import run_grid
+
+    run_grid(
+        args.csv,
+        args.timeframe,
+        args.base,
+        args.param,
+        metric=args.metric,
+        costs=args.costs,
+        slippage_pct=args.slippage,
+        top=args.top,
+        out=args.out,
+    )
+
+
+def _cmd_walk_forward(args: argparse.Namespace) -> None:
+    from .analysis.runner import run_walk_forward
+
+    run_walk_forward(
+        args.csv,
+        args.timeframe,
+        args.base,
+        args.param,
+        train_days=args.train_days,
+        test_days=args.test_days,
+        metric=args.metric,
+        costs=args.costs,
+        slippage_pct=args.slippage,
+        out=args.out,
     )
 
 
@@ -113,11 +148,32 @@ _COMMANDS = {
     "fetch-binance": _cmd_fetch_binance,
     "update": _cmd_update,
     "backtest": _cmd_backtest,
+    "grid": _cmd_grid,
+    "walk-forward": _cmd_walk_forward,
     "bot": _cmd_bot,
     "reset-halt": _cmd_reset_halt,
     "variants": _cmd_variants,
     "dashboard": _cmd_dashboard,
 }
+
+
+METRIC_CHOICES = ["calmar", "sharpe", "sortino", "cagr_pct", "total_return_pct"]
+
+
+def _add_cost_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--costs",
+        choices=["spot", "cfd"],
+        default="spot",
+        help="spot=現物の手数料ティア / cfd=Crypto CFD（手数料 0 + 建玉の日次コスト）",
+    )
+    p.add_argument(
+        "--slippage",
+        type=float,
+        default=0.0,
+        metavar="PCT",
+        help="成行約定のスリッページ率（例: 0.0002 = 0.02%%。CFD のスプレッド半分の目安）",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -148,19 +204,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--variant", nargs="+", metavar="NAME")
     p.add_argument("--train-end", metavar="DATE")
     p.add_argument("--out-trades", metavar="PATH")
-    p.add_argument(
-        "--costs",
-        choices=["spot", "cfd"],
-        default="spot",
-        help="spot=現物の手数料ティア / cfd=Crypto CFD（手数料 0 + 建玉の日次コスト）",
-    )
-    p.add_argument(
-        "--slippage",
-        type=float,
-        default=0.0,
-        metavar="PCT",
-        help="成行約定のスリッページ率（例: 0.0002 = 0.02%%。CFD のスプレッド半分の目安）",
-    )
+    _add_cost_args(p)
+
+    for name, help_text in (
+        ("grid", "パラメータのグリッドサーチ"),
+        ("walk-forward", "ウォークフォワード検証（学習期間で選び、直後の期間で評価）"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--csv", default="data/btc_usdt_1d.csv")
+        p.add_argument("--timeframe", default="1D", metavar="TF")
+        p.add_argument("--base", required=True, metavar="VARIANT", help="元にするバリアント")
+        p.add_argument(
+            "--param",
+            action="append",
+            default=[],
+            metavar="FIELD=V1,V2",
+            help="振る Variant のフィールド（複数指定可）例: atr_stop_mult=1.0,1.5,2.0",
+        )
+        p.add_argument("--metric", default="calmar", choices=METRIC_CHOICES)
+        _add_cost_args(p)
+        p.add_argument("--out", metavar="PATH", help="結果を CSV に保存")
+        if name == "grid":
+            p.add_argument("--top", type=int, default=20)
+        else:
+            p.add_argument("--train-days", type=int, default=730)
+            p.add_argument("--test-days", type=int, default=180)
 
     p = sub.add_parser("bot", help="ライブ取引ボットを起動")
     p.add_argument("--live", action="store_true", help="実発注する（DRY_RUN=0 も必要）")

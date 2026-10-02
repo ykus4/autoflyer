@@ -35,7 +35,8 @@ from ..trading.signals import (
 )
 from ..trading.strategy import Variant
 
-_WARMUP = max(MA_SLOW, REGIME_MA_LEN, MACD_SLOW, ADX_LEN, ATR_LEN, DON_TERM, ATR_Q_LOOKBACK) + 3
+# 主要指標が揃うまで取引しないバー数
+WARMUP_BARS = max(MA_SLOW, REGIME_MA_LEN, MACD_SLOW, ADX_LEN, ATR_LEN, DON_TERM, ATR_Q_LOOKBACK) + 3
 
 
 @dataclass(kw_only=True)
@@ -188,7 +189,7 @@ def run(
     garch_cache: dict[tuple[int, float], float] = {}
     equity_rows: list[dict] = []
 
-    for i in range(_WARMUP, len(x) - 1):
+    for i in range(WARMUP_BARS, len(x) - 1):
         cur = x.iloc[i]
         prev = x.iloc[i - 1]
         nxt = x.iloc[i + 1]

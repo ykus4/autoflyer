@@ -213,8 +213,8 @@ python -m autoflyer bot \
   --state var/state.json \
   --log-file var/bot.log
 
-# 本番（--live を付けると実注文）
-python -m autoflyer bot --live \
+# 本番（--live かつ .env の DRY_RUN=0 のときだけ実注文）
+DRY_RUN=0 python -m autoflyer bot --live \
   --timeframe 1D \
   --variant BREAKOUT_STOP1.5_GARCH40 \
   --amount 100000 \
@@ -225,7 +225,8 @@ python -m autoflyer bot --live \
 
 | オプション | デフォルト | 説明 |
 |---|---|---|
-| `--live` | false | 実注文を有効化（未指定はドライラン） |
+| `--live` | false | 実注文を有効化。**`DRY_RUN=0` も必要**（どちらかが欠ければドライラン） |
+| `--symbol` | `SYMBOL` または `FX_BTC_JPY` | `FX_*` は Crypto CFD（証拠金・建玉で管理）、それ以外は現物 |
 | `--timeframe` | `1D` | 時間足（`1H` `3H` `6H` `12H` `1D` `3D`） |
 | `--variant` | `STOP_3ATR` | 戦略バリアント名 |
 | `--amount` | `0` | 1取引あたりの上限（JPY、`0`=残高全額） |
@@ -233,6 +234,31 @@ python -m autoflyer bot --live \
 | `--max-dd-pct` | `20.0` | サーキットブレーカー発動閾値（%） |
 | `--state` | `var/state.json` | ポジション状態ファイルのパス |
 | `--log-file` | なし | ログファイルのパス |
+| `--no-exchange-stop` | false | 取引所に逆指値を置かず、Bot のポーリングだけでストップを監視する |
+
+**ライブ時の動き**
+
+- ストップ・利確・トレーリング（固定 ATR / チャンデリア / Supertrend / 利確→トレーリング / MAE）は
+  バックテストと同じ `trading/exits.py` で、確定バーごとに 1 回更新する。ショート（`enable_short`）は CFD のみ。
+- エントリー後、ストップ価格に**取引所の逆指値（STOP 特殊注文）**を置き、ストップが動けば置き直す。
+  Bot が止まっていても損切りが執行される。ストップ到達時は取引所の約定を優先し、Bot は二重に決済しない。
+- 成行注文は `getchildorders` で約定を確認し、実際の約定価格・数量を記録する。
+- 毎サイクル取引所の建玉と `state.json` を照合し、取引所を正として補正する。
+  方向の食い違い・Bot が知らない建玉などは自動で触らず**停止**して通知する。
+- サーキットブレーカーや要確認の停止は `state.json` に保存され、再起動しても停止したまま。
+  確認後に `python -m autoflyer reset-halt` で解除する。
+- 残高 API が一時的に取れないサイクル（メンテナンス等）は資産評価とサーキットブレーカー判定をスキップする。
+
+</details>
+
+<details>
+<summary><b>reset-halt</b> — 停止状態の解除</summary>
+
+```bash
+python -m autoflyer reset-halt --state var/state.json
+```
+
+サーキットブレーカー発動や建玉不一致で停止した Bot を再開できる状態に戻す。解除後に Bot を再起動する。
 
 </details>
 
@@ -341,7 +367,12 @@ autoflyer/
 │   ├── notifications.py     メール通知（SMTP）
 │   ├── dashboard.py         監視ダッシュボード API（FastAPI）
 │   ├── trading/             ライブ取引関連
-│   │   ├── bot.py           ライブ取引ループ・BitFlyerClient
+│   │   ├── bot.py           ライブ取引ループ（照合・逆指値・サーキットブレーカー）
+│   │   ├── broker.py        発注・約定確認・口座照会（PaperBroker / LiveBroker）
+│   │   ├── client.py        bitFlyer REST クライアント
+│   │   ├── exits.py         ストップ・利確・トレーリング（バックテストと共通）
+│   │   ├── signals.py       エントリー判定・サイジング（バックテストと共通）
+│   │   ├── state.py         state.json / equity.jsonl の永続化
 │   │   ├── strategy.py      バリアント定義（Variant dataclass・VARIANTS）
 │   │   ├── indicators.py    テクニカル指標（MA, ATR, ADX, RSI, MACD, Supertrend）
 │   │   ├── garch_sizing.py  GARCHボラティリティ ポジションサイジング
@@ -376,7 +407,8 @@ autoflyer/
 |---|---|---|
 | `--amount` | 許容損失額 / 0.185 | 最大DDに基づいたポジション上限 |
 | `--max-dd-pct` | `25` | 25%DD到達で自動停止 |
-| `DRY_RUN=1` | 本番移行前 | 実注文なしで動作確認 |
+| `DRY_RUN=1` | 本番移行前 | 実注文なしで動作確認（`DRY_RUN=0` にしない限り `--live` でも発注しない） |
+| 取引所の逆指値 | 自動 | Bot 停止中・急変時もストップを執行 |
 | GARCH sizing | 自動 | 高ボラ時にポジション自動縮小 |
 
 > **免責事項**: 本ソフトウェアは教育・研究目的で提供されており、いかなる投資成果も保証しません。

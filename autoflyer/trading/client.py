@@ -28,6 +28,9 @@ _COINGECKO_OHLC = "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc"
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = 2.0  # seconds; doubles each attempt
 _OHLCV_CACHE_TTL = 300.0  # seconds
+_STOP_ORDER_EXPIRE_MIN = (
+    525_600  # 逆指値の有効期限の上限（1 年）。既定の 30 日では長期保有中に失効する
+)
 
 T = TypeVar("T")
 
@@ -56,6 +59,11 @@ def retry_request(func: Callable[[], T]) -> T:
 def free_amount(balance: dict[str, dict[str, float]], currency: str) -> float:
     """`fetch_balance()` の結果から利用可能額を取り出す。通貨がなければ 0。"""
     return float(balance.get(currency, {}).get("free", 0))
+
+
+def total_amount(balance: dict[str, dict[str, float]], currency: str) -> float:
+    """`fetch_balance()` の結果から総額（注文で拘束中の分も含む）を取り出す。"""
+    return float(balance.get(currency, {}).get("total", 0))
 
 
 def net_position(positions: list[dict[str, Any]]) -> tuple[str | None, float, float]:
@@ -226,6 +234,20 @@ class BitFlyerClient:
             {"product_code": product_code, "parent_order_state": "ACTIVE"},
         )
 
+    def fetch_parent_order_status(
+        self, product_code: str, acceptance_id: str
+    ) -> dict[str, Any] | None:
+        """特殊注文の状態（parent_order_state / executed_size など）。見つからなければ None。
+
+        getparentorders は受付 ID で絞り込めないため、直近の注文から探す。
+        """
+        orders = self._private_get(
+            "/v1/me/getparentorders", {"product_code": product_code, "count": 100}
+        )
+        return next(
+            (o for o in orders if o.get("parent_order_acceptance_id") == acceptance_id), None
+        )
+
     def create_order(self, product_code: str, side: str, size: float) -> dict:
         """成行注文を出す。戻り値は {"child_order_acceptance_id": ...}。"""
         return self._private_post(
@@ -246,6 +268,7 @@ class BitFlyerClient:
             "/v1/me/sendparentorder",
             {
                 "order_method": "SIMPLE",
+                "minute_to_expire": _STOP_ORDER_EXPIRE_MIN,
                 "parameters": [
                     {
                         "product_code": product_code,

@@ -28,6 +28,7 @@ FLAT_STATE: dict[str, Any] = {
     "tp_hit": False,
     "stop_order_id": None,  # 取引所に置いた逆指値の受付 ID
     "stop_order_px": None,
+    "pending_exit": None,  # 決済できず再試行待ちの決済理由
 }
 
 STATE_DEFAULT: dict[str, Any] = {
@@ -36,7 +37,8 @@ STATE_DEFAULT: dict[str, Any] = {
     "last_bar_dt": None,  # 最後に処理した確定バー（バー単位の処理を 1 回にするため）
     "no_entry_bar_dt": None,  # このバーでは新規エントリーしない（同一バーでの再エントリー防止）
     "cooldown_remaining": 0,  # 損切り後の残りクールダウン（バー数）
-    "halted": False,  # サーキットブレーカー発動中
+    "pending_entry": None,  # 発注済みで約定を記録する前のエントリー方向（クラッシュ復元用）
+    "halted": False,  # サーキットブレーカー発動中・要確認で停止中
     "halt_reason": None,
 }
 

@@ -34,6 +34,13 @@ BB_WIDTH_Q_LOOKBACK = 200
 # --- Supertrend（トレンド追従トレーリングストップ）---
 SUPERTREND_ATR_LEN = 10
 
+# --- bitFlyer Crypto CFD (FX_BTC_JPY) のコスト ---
+# 取引手数料は無料。建玉には日次でレバレッジ手数料がかかり、加えて 8 時間ごとに
+# ファンディングレートを授受する（乖離がないときロングが 0.01% を支払いショートが受け取る）。
+# 実際のファンディングレートは乖離に応じて変動するため、ここでは基準値を使う。
+CFD_LEVERAGE_FEE_DAILY = 0.0004  # 建玉金額 × 0.04% / 日
+CFD_FUNDING_DAILY = 0.0003  # 0.01% × 3 回 / 日（ロング支払い・ショート受け取り）
+
 # --- 表示 ---
 SHOW_LAST_N_MONTHS = 24
 TZ_DISPLAY = "Asia/Tokyo"

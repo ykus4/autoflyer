@@ -24,9 +24,12 @@ autoflyer/
 │   │   ├── indicators.py    Technical indicators (MA, ATR, ADX, RSI, MACD, Supertrend)
 │   │   ├── garch_sizing.py  GARCH volatility-based position sizing
 │   │   ├── stats_filters.py Statistical filters (Hurst, HMM, Kelly, z-score, MAE)
-│   │   └── fees.py          bitFlyer fee tier model
+│   │   ├── market_data.py   Binance klines (live candles + backtest data)
+│   │   └── fees.py          Cost models: spot fee tiers / Crypto CFD holding cost
 │   ├── analysis/            Backtesting and data
-│   │   ├── backtest.py      Bar-by-bar backtest engine
+│   │   ├── backtest.py      Bar-by-bar backtest engine (spot / CFD costs)
+│   │   ├── metrics.py       CAGR, max DD, Sharpe, Sortino, Calmar
+│   │   ├── optimize.py      Parameter grid search and walk-forward
 │   │   ├── runner.py        Backtest orchestration across variants/timeframes
 │   │   ├── fetch.py         OHLCV fetching (GMO/Binance, incremental update)
 │   │   ├── data.py          CSV loading and OHLCV resampling
@@ -59,7 +62,9 @@ python -m autoflyer <command>
 | `fetch` | Fetch 1-minute OHLCV from GMO Coin |
 | `fetch-binance` | Fetch daily OHLCV from Binance (for backtesting) |
 | `update` | Append new bars to existing CSV |
-| `backtest` | Run backtest across variants and timeframes |
+| `backtest` | Run backtest across variants and timeframes (`--costs cfd`) |
+| `grid` | Grid search over Variant fields (`--param field=v1,v2`) |
+| `walk-forward` | Pick best params on train window, evaluate on next window |
 | `bot` | Start live trading bot |
 | `reset-halt` | Clear the persisted halted flag (circuit breaker / mismatch) |
 | `dashboard` | Start monitoring dashboard at `http://localhost:8080` |
@@ -134,6 +139,9 @@ Previous best: `BREAKOUT_STOP1.5_GARCH40` (+136%, PF 2.62, DD 30.1% on the same 
 - **Dependency direction is `analysis/` → `trading/`.** `trading/` must not import from
   `analysis/`.
 - Runtime files (state, equity, logs) all live under `var/`.
+- **Candles come from Binance** (`trading/market_data.py`): bitFlyer has no candle API. The live
+  bot uses `BTCJPY` rescaled to the bitFlyer price; do not reintroduce CoinGecko (its free OHLC
+  endpoint returns 4-day candles for long ranges).
 
 ## Key Files
 

@@ -1,7 +1,7 @@
 """bitFlyer Lightning REST client.
 
-Public market data for FX_BTC_JPY is read from bitFlyer; OHLCV history comes
-from CoinGecko because bitFlyer exposes no candle endpoint.
+Ticker, account and order endpoints are bitFlyer's; OHLCV history comes from
+Binance (see `market_data`) because bitFlyer exposes no candle endpoint.
 """
 
 from __future__ import annotations
@@ -19,12 +19,11 @@ from urllib.parse import urlencode
 import pandas as pd
 import requests
 
-from ..timeframes import to_minutes, to_pandas_rule
+from .market_data import recent_ohlcv
 
 log = logging.getLogger("autoflyer.client")
 
 _BF_BASE = "https://api.bitflyer.com"
-_COINGECKO_OHLC = "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc"
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = 2.0  # seconds; doubles each attempt
 _OHLCV_CACHE_TTL = 300.0  # seconds
@@ -81,15 +80,6 @@ def net_position(positions: list[dict[str, Any]]) -> tuple[str | None, float, fl
     return ("long" if signed > 0 else "short"), abs(signed), avg
 
 
-def coingecko_days(tf: str, limit: int) -> int:
-    """CoinGecko が受け付ける `days` 値のうち、limit 本を賄える最小のものを返す。"""
-    days = max(1, (to_minutes(tf) * limit) // 1440 + 1)
-    for d in (1, 7, 14, 30, 90, 180, 365):
-        if d >= days:
-            return d
-    return 365
-
-
 class BitFlyerClient:
     """BitFlyer Lightning REST APIの薄いラッパー。"""
 
@@ -118,44 +108,18 @@ class BitFlyerClient:
 
         return retry_request(_do)
 
-    def fetch_ohlcv(self, product_code: str, tf: str, limit: int = 300) -> pd.DataFrame:
-        """CoinGecko APIで日足/時間足OHLCVを取得する（キャッシュ付き）。"""
+    def fetch_ohlcv(self, product_code: str, tf: str, limit: int = 1000) -> pd.DataFrame:
+        """直近 `limit` 本の OHLCV（Binance BTCJPY、キャッシュ付き）。
+
+        bitFlyer にはローソク足 API がないため、バックテストと同じ Binance の足を使う。
+        `product_code` はキャッシュの区別にだけ使う。最後の 1 本は形成中の足。
+        """
         cache_key = f"{product_code}:{tf}:{limit}"
         cached = self._ohlcv_cache.get(cache_key)
         if cached and (time.time() - cached[0]) < _OHLCV_CACHE_TTL:
             return cached[1].copy()
 
-        def _do() -> list:
-            params: dict[str, str | int] = {
-                "vs_currency": "jpy",
-                "days": coingecko_days(tf, limit),
-            }
-            resp = self._session.get(_COINGECKO_OHLC, params=params, timeout=15)
-            resp.raise_for_status()
-            return resp.json()
-
-        df = pd.DataFrame(retry_request(_do), columns=["ts", "open", "high", "low", "close"])
-        df["dt"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-        df["volume"] = 0.0
-        df = df[["dt", "open", "high", "low", "close", "volume"]]
-
-        # CoinGecko は日足以外を返さないため、必要な時間足へリサンプリングする
-        if tf.upper().strip() not in ("1D", "D"):
-            df = (
-                df.set_index("dt")
-                .resample(to_pandas_rule(tf))
-                .agg(
-                    open=("open", "first"),
-                    high=("high", "max"),
-                    low=("low", "min"),
-                    close=("close", "last"),
-                    volume=("volume", "sum"),
-                )
-                .dropna()
-                .reset_index()
-            )
-
-        result = df.tail(limit).reset_index(drop=True)
+        result = retry_request(lambda: recent_ohlcv(tf, limit, session=self._session))
         self._ohlcv_cache[cache_key] = (time.time(), result)
         return result.copy()
 

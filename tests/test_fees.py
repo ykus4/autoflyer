@@ -1,8 +1,14 @@
-"""Unit tests for btcfx.fees."""
+"""Unit tests for autoflyer.trading.fees."""
 
 import pandas as pd
+import pytest
 
-from autoflyer.trading.fees import FeeTierModel, rate_for_volume
+from autoflyer.trading.fees import (
+    CfdCostModel,
+    FeeTierModel,
+    cost_model_for_product,
+    rate_for_volume,
+)
 
 
 class TestRateForVolume:
@@ -55,3 +61,20 @@ class TestFeeTierModel:
         m.step(self._ts("2024-01-06"))
         # 累積 250,000 JPY → 0.0013
         assert m.rate == 0.0013
+
+
+class TestCfdCostModel:
+    def test_no_trading_fee(self):
+        m = CfdCostModel()
+        m.step(pd.Timestamp("2024-01-01", tz="UTC"))
+        m.record_fill(pd.Timestamp("2024-01-01", tz="UTC"), 1e9)
+        assert m.rate == 0.0
+
+    def test_long_pays_more_than_short(self):
+        m = CfdCostModel(leverage_fee_daily=0.0004, funding_daily=0.0003)
+        assert m.holding_rate("long") == pytest.approx(0.0007)
+        assert m.holding_rate("short") == pytest.approx(0.0001)
+
+    def test_product_selects_model(self):
+        assert isinstance(cost_model_for_product("FX_BTC_JPY"), CfdCostModel)
+        assert isinstance(cost_model_for_product("BTC_JPY"), FeeTierModel)
